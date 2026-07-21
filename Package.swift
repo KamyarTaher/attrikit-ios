@@ -3,36 +3,48 @@
 import PackageDescription
 
 let package = Package(
-    name: "AttrKit",
+    name: "AttriKit",
     platforms: [
         .iOS(.v16),
         .macOS(.v13),
     ],
     products: [
-        .library(name: "AttrKitCore", targets: ["AttrKitCore"]),
-        .library(name: "AttrKitLinkToken", targets: ["AttrKitLinkToken"]),
+        .library(name: "AttriKitCore", targets: ["AttriKitCore"]),
+        .library(name: "AttriKitTracking", targets: ["AttriKitTracking"]),
+        .library(name: "AttriKitLinkToken", targets: ["AttriKitLinkToken"]),
     ],
     targets: [
         .target(
-            name: "AttrKitCore",
+            name: "AttriKitCore",
             resources: [.process("Resources")],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
         .target(
-            name: "AttrKitLinkToken",
-            dependencies: ["AttrKitCore"],
+            name: "AttriKitTracking",
+            dependencies: ["AttriKitCore"],
+            resources: [.process("Resources")],
+            swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
+        ),
+        .target(
+            name: "AttriKitLinkToken",
+            dependencies: ["AttriKitCore"],
             resources: [.process("Resources")],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
         .testTarget(
-            name: "AttrKitCoreTests",
-            dependencies: ["AttrKitCore"],
+            name: "AttriKitCoreTests",
+            dependencies: ["AttriKitCore"],
             resources: [.copy("Fixtures")],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
         .testTarget(
-            name: "AttrKitLinkTokenTests",
-            dependencies: ["AttrKitCore", "AttrKitLinkToken"],
+            name: "AttriKitTrackingTests",
+            dependencies: ["AttriKitCore", "AttriKitTracking"],
+            swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
+        ),
+        .testTarget(
+            name: "AttriKitLinkTokenTests",
+            dependencies: ["AttriKitCore", "AttriKitLinkToken"],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
     ],

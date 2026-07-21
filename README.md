@@ -1,189 +1,140 @@
-# AttrKit iOS SDK
+# AttriKit for iOS
 
-Privacy-clean web-to-app attribution for iOS. AttrKit connects ad clicks to installs
-using the proof Apple allows — Apple-signed install confirmation and exact single-use
-link tokens — never an advertising identifier, never a device graph.
+AttriKit is a consent-aware measurement SDK for first-open attribution, event delivery,
+deferred links, and optional App Tracking Transparency evidence.
 
-- **Deterministic where proof exists.** A match is only called *verified* when it is
-  backed by direct evidence: Apple confirmation or an exact AttrKit link token.
-- **Honest where it doesn't.** Everything else stays an aggregate, campaign-level
-  estimate with its range attached — never a fabricated per-install "match".
-- **Privacy-clean by construction.** No IDFA, no fingerprinting, no advertising
-  identifiers of any kind. Raw email never leaves the device (SHA-256 on-device only,
-  and only when you explicitly provide it).
+## Installation
 
-## Requirements
+In Xcode, choose **File > Add Package Dependencies** and enter:
 
-- iOS 16+ / macOS 13+
-- Swift 5.9+
-- Xcode 15+
-
-## Installation (Swift Package Manager)
-
-In Xcode: **File → Add Package Dependencies…** and enter:
-
-```
-https://github.com/KamyarTaher/attrkit-ios
+```text
+https://github.com/KamyarTaher/attrikit-ios
 ```
 
-Or in your `Package.swift`:
+Select `AttriKitCore`. Add `AttriKitTracking` only when the app requests ATT and add
+`AttriKitLinkToken` only when it explicitly consumes a deferred-link token.
+
+For a package manifest:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/KamyarTaher/attrkit-ios", from: "1.0.0"),
-],
-// target:
-.product(name: "AttrKitCore", package: "attrkit-ios"),
+    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.0.0"),
+]
 ```
 
-The package ships two libraries:
+## Core setup
 
-| Library | Use it for |
-|---|---|
-| `AttrKitCore` | Attribution, first-open + event tracking, consent, deep links. **This is all most apps need.** |
-| `AttrKitLinkToken` | Optional. Redeems a deferred deep-link token from the system pasteboard (e.g. after a "copy link" web flow). |
+Configure the HTTPS ingest endpoint in the host app's Info.plist:
 
-## Quickstart
+```xml
+<key>AttriKitEndpoint</key>
+<string>https://your-attrikit-ingest.example</string>
+```
 
-### 1. Start the SDK
-
-Call `start` as early as possible — typically in your `App.init` or
-`application(_:didFinishLaunchingWithOptions:)`. Use the **publishable key** from your
-AttrKit dashboard (app settings).
+Then start measurement after obtaining the app's measurement consent:
 
 ```swift
-import AttrKitCore
+import AttriKitCore
 
-@main
-struct MyApp: App {
-    init() {
-        AttrKit.start(apiKey: "ak_pub_…", consent: .measurementGranted)
-    }
+AttriKit.start(apiKey: "YOUR_PUBLISHABLE_KEY", consent: .measurementGranted)
+AttriKit.track(try AttriKitEvent("trial_started"), properties: ["plan": "annual"])
+```
 
-    var body: some Scene { /* … */ }
+Do not put email addresses or phone numbers in event properties. When a user supplies
+first-party funnel identity, use the dedicated API. It normalizes and SHA-256 hashes the
+values synchronously on-device and never persists the raw input:
+
+```swift
+AttriKit.setFunnelIdentity(
+    email: "person@example.com",
+    phone: "+41 79 123 45 67"
+)
+```
+
+Phone numbers must include a country calling code (a leading `+` or `00` is accepted).
+The hashes are included in the first first-open payload when set before startup and in a
+later identify payload when set after startup.
+
+## App Tracking Transparency (optional)
+
+Add the `AttriKitTracking` product only if the app needs IDFA-based advertising
+measurement. The host—not the package—must include this exact Info.plist key before
+calling `requestConsent()`; Apple's ATT API can terminate an app that calls it without a
+usage description:
+
+```xml
+<key>NSUserTrackingUsageDescription</key>
+<string>We use your device identifier to measure advertising performance.</string>
+```
+
+Request ATT from an appropriate UI moment before starting AttriKit when IDFA must be in
+the first first-open payload. A denial still starts consent-safe core measurement:
+
+```swift
+import AttriKitCore
+import AttriKitTracking
+
+Task {
+    let trackingConsent = await AttriKitTracking.requestConsent()
+    let sdkConsent: AttriKitConsent = trackingConsent == .trackingGranted
+        ? .trackingGranted
+        : .measurementGranted
+    AttriKit.start(apiKey: "YOUR_PUBLISHABLE_KEY", consent: sdkConsent)
 }
 ```
 
-The first launch after install reports the first-open automatically — this is what the
-attribution pipeline matches against your campaigns.
+`AttriKitTracking.advertisingIdentifier` is non-nil only while ATT is authorized and
+never returns Apple's all-zero sentinel. `AttriKitTracking.vendorIdentifier` exposes
+IDFV without requiring ATT. Once the tracking module has been used, AttriKit forwards
+IDFV and, only when authorized, IDFA in the first-open payload and later identify
+payloads. If core measurement was already started, the resolved identifiers are
+forwarded in an identify payload instead. On macOS, ATT is unavailable and
+`requestConsent()` returns `.unknown`.
 
-### 2. Consent
+The tracking privacy manifest deliberately declares no tracking domains. Apple blocks
+connections to declared tracking domains when ATT is denied; AttriKit instead enforces
+ATT at IDFA access so consent-safe ingest traffic continues without IDFA.
 
-Pass the consent state you already collected (ATT prompt, your own consent flow, or
-`.unknown` before either). Update it whenever it changes:
+## What your app must declare
 
-```swift
-AttrKit.setConsent(.trackingGranted)   // or .measurementGranted / .denied / .revoked
-```
+App Store Connect answers are app-level and must include AttriKit plus the rest of the
+host app. For a host using the SDK exactly as documented above, enter these rows under
+**App Privacy > Data Collection**:
 
-| Consent | Effect |
-|---|---|
-| `.measurementGranted` | Measurement allowed, no cross-app tracking. The common ATT-declined case. |
-| `.trackingGranted` | Full measurement. |
-| `.denied` / `.revoked` | Collection is suppressed client-side. |
-| `.unknown` | Nothing is sent until you resolve it. |
+### Core only
 
-### 3. Read the attribution
+| App Store Connect data type | Linked to user | Used for tracking | Purposes |
+| --- | --- | --- | --- |
+| Identifiers > Device ID | Yes | No | App Functionality; Analytics; Developer's Advertising or Marketing |
+| Usage Data > Product Interaction | Yes | No | Analytics |
+| Contact Info > Email Address | Yes | No | Analytics; Developer's Advertising or Marketing |
+| Contact Info > Phone Number | Yes | No | Analytics; Developer's Advertising or Marketing |
 
-```swift
-let result = await AttrKit.attribution()
+Declare the Email Address row only when the host calls `setFunnelIdentity(email:)` and
+the Phone Number row only when it calls `setFunnelIdentity(phone:)`. The values are
+hashed, but Apple still treats them as their underlying contact-information types.
 
-switch result {
-case .attributed(let attribution):
-    // attribution.method   — how it was matched (e.g. exact link token, Apple confirmation)
-    // attribution.network  — e.g. "meta", "tiktok", "apple_search_ads"
-    // attribution.campaignID
-    // attribution.finality — "final" or "provisional"
-    break
-case .unattributed:
-    break // organic, or below the evidence bar
-case .timedOut, .notStarted, .consentRequired, .failed:
-    break
-}
-```
+### Core + tracking
 
-`attribution(timeout:)` accepts a `Duration` (default 2s) — the SDK never blocks your
-launch path longer than that.
+| App Store Connect data type | Linked to user | Used for tracking | Purposes |
+| --- | --- | --- | --- |
+| Identifiers > Device ID | Yes | Yes | App Functionality; Analytics; Developer's Advertising or Marketing |
+| Usage Data > Product Interaction | Yes | No | Analytics |
+| Contact Info > Email Address | Yes | No | Analytics; Developer's Advertising or Marketing |
+| Contact Info > Phone Number | Yes | No | Analytics; Developer's Advertising or Marketing |
 
-### 4. Track conversion and revenue events
+The same conditional rule applies to the two Contact Info rows. If the host or another
+SDK also links Product Interaction or hashed contact information with third-party data
+for targeted advertising or advertising measurement, mark those additional rows as
+used for tracking too.
 
-```swift
-try AttrKit.track(AttrKitEvent("signup_complete"))
-try AttrKit.track(AttrKitEvent("purchase"), properties: [
-    "value": .number(9.99),
-    "currency": .string("USD"),
-])
-```
+If the host sends purchase or subscription events, it must additionally declare
+**Purchases > Purchase History**, linked to the user, not used for tracking by AttriKit,
+for **Analytics** and **App Functionality**. Reconcile these rows whenever host behavior
+or enabled SDK products change; an SDK privacy manifest does not replace the app's
+answers in App Store Connect.
 
-Event names must match `^[a-z][a-z0-9_.-]{0,127}$`. `purchase` / `refund` (and
-`*.purchase` / `*.refund`) are protected revenue events — they are queued with higher
-durability and never silently dropped.
+## Deferred link tokens (optional)
 
-### 5. Deep links
-
-Route incoming universal links through the SDK so AttrKit can resolve deferred
-attribution and hand you the destination:
-
-```swift
-// SwiftUI
-.onOpenURL { url in
-    let result = await AttrKit.handle(url)
-    if case .handled(let destination) = result {
-        // navigate to destination
-    }
-}
-```
-
-### 6. Optional: pasteboard link tokens (`AttrKitLinkToken`)
-
-If your web flow copies a link token to the pasteboard, redeem it on first open:
-
-```swift
-import AttrKitLinkToken
-
-if await AttrKit.canReadLinkTokenPasteboard() {
-    _ = await AttrKitLinkToken.consumePasteboard()
-}
-```
-
-### 7. User identity and data deletion
-
-```swift
-AttrKit.setUserID("your-opaque-user-id")   // optional, your own stable id; pass nil to clear
-
-try await AttrKit.deleteData()             // GDPR/CCPA erasure — wipes queued + server-side data for this install
-```
-
-## Privacy posture
-
-- **No advertising identifiers.** The SDK never reads IDFA or any equivalent.
-- **No fingerprinting.** Matching uses Apple-signed install evidence and exact,
-  single-use link tokens — not probabilistic device traits.
-- **On-device hashing only.** If you provide an email on your own web funnel (web SDK),
-  it is SHA-256 hashed in the browser before anything is sent; raw email never transits.
-- **Consent-gated.** Nothing is collected while consent is `.denied`, `.revoked`, or
-  unresolved `.unknown`.
-- **Data deletion built in.** `deleteData()` is a first-class API, not a support ticket.
-
-Disclose the SDK in your App Store privacy nutrition label accordingly (analytics /
-product interaction data, not linked to advertising).
-
-## How attribution works (30 seconds)
-
-1. Your ad points to an AttrKit link. The link edge records the click and serves a
-   sub-100ms interstitial that captures the exact proof (click id + single-use token),
-   then redirects to the App Store.
-2. On first open, this SDK reports the install and presents the token.
-3. AttrKit redeems the token → **verified, per-install, deterministic attribution**.
-   Installs without token/Apple evidence stay aggregate estimates with ranges — labeled
-   as such, never dressed up as verified.
-
-## Links
-
-- Dashboard + docs: [attrkit.waiverkit.io](https://attrkit.waiverkit.io) (temporary domain)
-- Issues: use this repository's issue tracker.
-
-## License
-
-Proprietary — © AttrKit. Distribution via SPM for integration into host apps;
-see the dashboard terms for usage rights.
+`AttriKitLinkToken` only accepts the server's versioned `ak1_` token format. The URL
+query parameter remains `attrkit_token` for wire compatibility.

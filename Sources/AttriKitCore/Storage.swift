@@ -95,42 +95,69 @@ actor SDKStorage {
 
     private let defaultsBox: Defaults
     private let keychain: InstallationIDStoring
-    private let queueURL: URL
+    private let legacyKeychain: InstallationIDStoring?
+    private let queueURL: URL?
+    private let queueDirectoryRemover: @Sendable (URL) throws -> Void
     private let maxEvents: Int
     private let maxBytes: Int
     private let maxAge: TimeInterval
+    private var inMemoryQueue: [EventEnvelope] = []
+
+    private struct MigratingKey {
+        let current: String
+        let legacy: String
+    }
 
     private enum Key {
-        static let consent = "io.attrkit.consent"
-        static let installEpoch = "io.attrkit.install-epoch"
-        static let retry = "io.attrkit.first-open-retry"
-        static let userID = "io.attrkit.user-id"
-        static let fallbackInstallation = "io.attrkit.fallback-installation-id"
+        static let consent = MigratingKey(current: "io.attrikit.consent", legacy: "io.attrkit.consent")
+        static let installEpoch = MigratingKey(current: "io.attrikit.install-epoch", legacy: "io.attrkit.install-epoch")
+        static let retry = MigratingKey(current: "io.attrikit.first-open-retry", legacy: "io.attrkit.first-open-retry")
+        static let userID = MigratingKey(current: "io.attrikit.user-id", legacy: "io.attrkit.user-id")
+        static let fallbackInstallation = MigratingKey(current: "io.attrikit.fallback-installation-id", legacy: "io.attrkit.fallback-installation-id")
     }
 
     init(
         defaults: Defaults = .standard,
         keychain: InstallationIDStoring? = nil,
+        legacyKeychain: InstallationIDStoring? = nil,
         directory: URL? = nil,
+        directoryProvider: @escaping @Sendable (FileManager.SearchPathDirectory) -> URL? = {
+            FileManager.default.urls(for: $0, in: .userDomainMask).first
+        },
+        queueDirectoryRemover: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.removeItem(at: $0)
+        },
         maxEvents: Int = 100,
         maxBytes: Int = 1_048_576,
         maxAge: TimeInterval = 72 * 60 * 60
     ) {
         self.defaultsBox = defaults
-        self.keychain = keychain ?? KeychainInstallationIDStore(service: "io.attrkit.core.\(Bundle.main.bundleIdentifier ?? "unknown")")
-        let base = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.queueURL = base.appendingPathComponent("AttrKit", isDirectory: true).appendingPathComponent("events-v1.json")
+        if let keychain {
+            self.keychain = keychain
+            self.legacyKeychain = legacyKeychain
+        } else {
+            let bundleID = Bundle.main.bundleIdentifier ?? "unknown"
+            self.keychain = KeychainInstallationIDStore(service: "io.attrikit.core.\(bundleID)")
+            self.legacyKeychain = KeychainInstallationIDStore(service: "io.attrkit.core.\(bundleID)")
+        }
+        let base = directory
+            ?? directoryProvider(.applicationSupportDirectory)
+            ?? directoryProvider(.cachesDirectory)
+        self.queueURL = base?
+            .appendingPathComponent("AttriKit", isDirectory: true)
+            .appendingPathComponent("events-v1.json")
+        self.queueDirectoryRemover = queueDirectoryRemover
         self.maxEvents = maxEvents
         self.maxBytes = maxBytes
         self.maxAge = maxAge
     }
 
-    func storeConsent(_ consent: AttrKitConsent) {
-        defaultsBox.value.set(consent.rawValue, forKey: Key.consent)
+    func storeConsent(_ consent: AttriKitConsent) {
+        defaultsBox.value.set(consent.rawValue, forKey: Key.consent.current)
     }
 
-    func storedConsent() -> AttrKitConsent {
-        defaultsBox.value.string(forKey: Key.consent).flatMap(AttrKitConsent.init(rawValue:)) ?? .unknown
+    func storedConsent() -> AttriKitConsent {
+        migratedString(for: Key.consent).flatMap(AttriKitConsent.init(rawValue:)) ?? .unknown
     }
 
     func initializeIdentities() throws -> InstallationIdentity {
@@ -145,23 +172,27 @@ actor SDKStorage {
             if let existing = try keychain.read() {
                 installationID = existing
                 lineagePresent = true
+            } else if let legacy = try legacyKeychain?.read() {
+                installationID = legacy
+                try? keychain.write(legacy)
+                lineagePresent = true
             } else {
                 installationID = UUID()
                 try keychain.write(installationID)
                 lineagePresent = false
             }
         } catch {
-            let fallback = defaultsBox.value.string(forKey: Key.fallbackInstallation).flatMap(UUID.init(uuidString:))
+            let fallback = migratedString(for: Key.fallbackInstallation).flatMap(UUID.init(uuidString:))
             installationID = fallback ?? UUID()
             if fallback == nil {
-                defaultsBox.value.set(installationID.uuidString.lowercased(), forKey: Key.fallbackInstallation)
+                defaultsBox.value.set(installationID.uuidString.lowercased(), forKey: Key.fallbackInstallation.current)
             }
             lineagePresent = false
         }
 
-        let existingEpoch = defaultsBox.value.string(forKey: Key.installEpoch).flatMap(UUID.init(uuidString:))
+        let existingEpoch = migratedString(for: Key.installEpoch).flatMap(UUID.init(uuidString:))
         let epoch = existingEpoch ?? UUID()
-        if existingEpoch == nil { defaultsBox.value.set(epoch.uuidString.lowercased(), forKey: Key.installEpoch) }
+        if existingEpoch == nil { defaultsBox.value.set(epoch.uuidString.lowercased(), forKey: Key.installEpoch.current) }
         return InstallationIdentity(
             installationID: installationID,
             installEpochID: epoch,
@@ -171,16 +202,24 @@ actor SDKStorage {
     }
 
     func setUserID(_ userID: String?) {
-        defaultsBox.value.set(userID, forKey: Key.userID)
+        if let userID {
+            defaultsBox.value.set(userID, forKey: Key.userID.current)
+        } else {
+            removeValues(for: Key.userID)
+        }
+    }
+
+    func storedUserID() -> String? {
+        migratedString(for: Key.userID)
     }
 
     func setRetryState(_ state: RetryState?) throws {
-        if let state { defaultsBox.value.set(try JSONEncoder().encode(state), forKey: Key.retry) }
-        else { defaultsBox.value.removeObject(forKey: Key.retry) }
+        if let state { defaultsBox.value.set(try JSONEncoder().encode(state), forKey: Key.retry.current) }
+        else { removeValues(for: Key.retry) }
     }
 
     func retryState() -> RetryState? {
-        guard let data = defaultsBox.value.data(forKey: Key.retry) else { return nil }
+        guard let data = migratedData(for: Key.retry) else { return nil }
         return try? JSONDecoder().decode(RetryState.self, from: data)
     }
 
@@ -219,15 +258,49 @@ actor SDKStorage {
     }
 
     func wipeQueue() throws {
-        try? FileManager.default.removeItem(at: queueURL)
+        guard let queueURL else {
+            inMemoryQueue.removeAll()
+            return
+        }
+        let queueDirectory = queueURL.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: queueDirectory.path) else { return }
+        try queueDirectoryRemover(queueDirectory)
     }
 
     func deleteAll() throws {
-        try wipeQueue()
-        try keychain.delete()
-        defaultsBox.value.removeObject(forKey: Key.installEpoch)
-        defaultsBox.value.removeObject(forKey: Key.retry)
-        defaultsBox.value.removeObject(forKey: Key.userID)
+        var firstError: Error?
+        do { try wipeQueue() } catch { firstError = error }
+        do { try keychain.delete() } catch {
+            if firstError == nil { firstError = error }
+        }
+        do { try legacyKeychain?.delete() } catch {
+            if firstError == nil { firstError = error }
+        }
+        removeValues(for: Key.consent)
+        removeValues(for: Key.installEpoch)
+        removeValues(for: Key.fallbackInstallation)
+        removeValues(for: Key.retry)
+        removeValues(for: Key.userID)
+        if let firstError { throw firstError }
+    }
+
+    private func migratedString(for key: MigratingKey) -> String? {
+        if let value = defaultsBox.value.string(forKey: key.current) { return value }
+        guard let legacy = defaultsBox.value.string(forKey: key.legacy) else { return nil }
+        defaultsBox.value.set(legacy, forKey: key.current)
+        return legacy
+    }
+
+    private func migratedData(for key: MigratingKey) -> Data? {
+        if let value = defaultsBox.value.data(forKey: key.current) { return value }
+        guard let legacy = defaultsBox.value.data(forKey: key.legacy) else { return nil }
+        defaultsBox.value.set(legacy, forKey: key.current)
+        return legacy
+    }
+
+    private func removeValues(for key: MigratingKey) {
+        defaultsBox.value.removeObject(forKey: key.current)
+        defaultsBox.value.removeObject(forKey: key.legacy)
     }
 
     private func isProtected(_ event: EventEnvelope) -> Bool {
@@ -235,18 +308,34 @@ actor SDKStorage {
     }
 
     private func encodedSize(_ events: [EventEnvelope]) -> Int {
-        (try? attrKitJSONEncoder().encode(QueueFile(events: events)).count) ?? .max
+        (try? attriKitJSONEncoder().encode(QueueFile(events: events)).count) ?? .max
     }
 
     private func readQueue() throws -> [EventEnvelope] {
+        guard let queueURL else { return inMemoryQueue }
         guard FileManager.default.fileExists(atPath: queueURL.path) else { return [] }
-        return try attrKitJSONDecoder().decode(QueueFile.self, from: Data(contentsOf: queueURL)).events
+        let data = try Data(contentsOf: queueURL)
+        do {
+            return try attriKitJSONDecoder().decode(QueueFile.self, from: data).events
+        } catch {
+            let timestamp = Int(Date().timeIntervalSince1970)
+            let quarantineURL = queueURL.appendingPathExtension("corrupted-\(timestamp)")
+            try? FileManager.default.moveItem(at: queueURL, to: quarantineURL)
+            return []
+        }
     }
 
     private func writeQueue(_ events: [EventEnvelope]) throws {
-        let directory = queueURL.deletingLastPathComponent()
+        guard let queueURL else {
+            inMemoryQueue = events
+            return
+        }
+        var directory = queueURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let data = try attrKitJSONEncoder().encode(QueueFile(events: events))
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        try? directory.setResourceValues(resourceValues)
+        let data = try attriKitJSONEncoder().encode(QueueFile(events: events))
         try data.write(to: queueURL, options: .atomic)
         #if os(iOS)
         try FileManager.default.setAttributes(
@@ -257,20 +346,20 @@ actor SDKStorage {
     }
 }
 
-func validateProperties(_ properties: [String: AttrKitValue]) throws {
+func validateProperties(_ properties: [String: AttriKitValue]) throws {
     let forbiddenKey = try NSRegularExpression(pattern: "email|e-mail|phone|mobile|address|name", options: .caseInsensitive)
     let email = try NSRegularExpression(pattern: #"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#, options: .caseInsensitive)
     let phone = try NSRegularExpression(pattern: #"(?:^|\D)(?:\+?\d[\d\s().-]{7,}\d)(?:$|\D)"#)
     for (key, value) in properties {
-        guard !key.isEmpty, key.utf8.count <= 64 else { throw AttrKitError.invalidProperty }
+        guard !key.isEmpty, key.utf8.count <= 64 else { throw AttriKitError.invalidProperty }
         let keyRange = NSRange(key.startIndex..., in: key)
-        guard forbiddenKey.firstMatch(in: key, range: keyRange) == nil else { throw AttrKitError.invalidProperty }
+        guard forbiddenKey.firstMatch(in: key, range: keyRange) == nil else { throw AttriKitError.invalidProperty }
         if case .string(let string) = value {
-            guard string.utf8.count <= 1_024 else { throw AttrKitError.invalidProperty }
+            guard string.utf8.count <= 1_024 else { throw AttriKitError.invalidProperty }
             let range = NSRange(string.startIndex..., in: string)
             guard email.firstMatch(in: string, range: range) == nil,
-                  phone.firstMatch(in: string, range: range) == nil else { throw AttrKitError.invalidProperty }
+                  phone.firstMatch(in: string, range: range) == nil else { throw AttriKitError.invalidProperty }
         }
-        if case .number(let number) = value, !number.isFinite { throw AttrKitError.invalidProperty }
+        if case .number(let number) = value, !number.isFinite { throw AttriKitError.invalidProperty }
     }
 }

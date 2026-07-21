@@ -2,7 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-@testable import AttrKitCore
+@testable import AttriKitCore
 
 final class MemoryKeychain: InstallationIDStoring, @unchecked Sendable {
     private let lock = NSLock()
@@ -46,20 +46,50 @@ struct StubEvidence: PlatformEvidenceProviding {
     func appVersion() -> String { "1.2.3 (42)" }
 }
 
+final class SuspendedEvidence: PlatformEvidenceProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func appTransactionJWS() async -> String? {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            continuations.append(continuation)
+            lock.unlock()
+        }
+        return nil
+    }
+
+    func adServicesToken() async -> String? { nil }
+    func coarseContext() -> CoarseContext {
+        CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
+    }
+    func appVersion() -> String { "1.2.3 (42)" }
+
+    func release() {
+        lock.lock()
+        let pending = continuations
+        continuations.removeAll()
+        lock.unlock()
+        for continuation in pending { continuation.resume() }
+    }
+}
+
 func makeTestConfiguration(
     transport: HTTPTransport,
     keychain: InstallationIDStoring = MemoryKeychain(),
     defaults: UserDefaults? = nil,
     directory: URL? = nil,
-    evidence: PlatformEvidenceProviding = StubEvidence(transaction: nil, adToken: nil)
-) -> AttrKitTestingConfiguration {
-    let suite = defaults ?? UserDefaults(suiteName: "AttrKitTests.\(UUID())")!
-    let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttrKitTests-\(UUID())")
-    return AttrKitTestingConfiguration(
+    evidence: PlatformEvidenceProviding = StubEvidence(transaction: nil, adToken: nil),
+    deviceEvidence: DeviceEvidence = DeviceEvidence(idfa: nil, idfv: nil)
+) -> AttriKitTestingConfiguration {
+    let suite = defaults ?? UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
+    let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
+    return AttriKitTestingConfiguration(
         baseURL: URL(string: "https://unit.test")!,
         transport: transport,
         storage: SDKStorage(defaults: .init(value: suite), keychain: keychain, directory: folder),
         evidence: evidence,
+        deviceEvidence: { deviceEvidence },
         now: { Date() }
     )
 }

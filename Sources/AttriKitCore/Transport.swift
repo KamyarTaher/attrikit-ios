@@ -42,7 +42,7 @@ struct RequestFactory: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
-        request.setValue(signature(for: compressed), forHTTPHeaderField: "X-AttrKit-Signature")
+        request.setValue(signature(for: compressed), forHTTPHeaderField: "X-AttriKit-Signature")
         return request
     }
 
@@ -50,7 +50,7 @@ struct RequestFactory: Sendable {
         var request = commonRequest(path: path)
         request.httpMethod = "GET"
         request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
-        request.setValue(signature(for: Data()), forHTTPHeaderField: "X-AttrKit-Signature")
+        request.setValue(signature(for: Data()), forHTTPHeaderField: "X-AttriKit-Signature")
         if let etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
         return request
     }
@@ -59,9 +59,9 @@ struct RequestFactory: Sendable {
         let url = baseURL.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        request.setValue("AttrKit-Publishable \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("ios/\(attrKitSDKVersion)", forHTTPHeaderField: "X-AttrKit-SDK")
-        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-AttrKit-Request-ID")
+        request.setValue("AttriKit-Publishable \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("ios/\(attriKitSDKVersion)", forHTTPHeaderField: "X-AttriKit-SDK")
+        request.setValue(UUID().uuidString.lowercased(), forHTTPHeaderField: "X-AttriKit-Request-ID")
         return request
     }
 

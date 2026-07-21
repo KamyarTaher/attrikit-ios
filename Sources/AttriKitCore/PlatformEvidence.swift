@@ -42,7 +42,7 @@ struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
         let os = "\(version.majorVersion).\(version.minorVersion)"
         #if os(iOS)
         let deviceClass: String
-        switch UIDevice.current.userInterfaceIdiom {
+        switch onMainThread({ UIDevice.current.userInterfaceIdiom }) {
         case .phone: deviceClass = "phone"
         case .pad: deviceClass = "tablet"
         default: deviceClass = "unknown"
@@ -64,3 +64,14 @@ struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
         return "\(version) (\(build))"
     }
 }
+
+#if os(iOS)
+private func onMainThread<T: Sendable>(_ operation: @escaping @MainActor @Sendable () -> T) -> T {
+    if Thread.isMainThread {
+        return MainActor.assumeIsolated { operation() }
+    }
+    return DispatchQueue.main.sync {
+        MainActor.assumeIsolated { operation() }
+    }
+}
+#endif

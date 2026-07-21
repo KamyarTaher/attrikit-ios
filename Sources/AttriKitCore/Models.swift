@@ -1,9 +1,9 @@
 import Foundation
 
-let attrKitSDKVersion = "1.0.0"
+let attriKitSDKVersion = "1.0.0"
 
 struct ConsentPayload: Codable, Sendable {
-    let state: AttrKitConsent
+    let state: AttriKitConsent
     let policyVersion: Int
 
     enum CodingKeys: String, CodingKey {
@@ -37,6 +37,21 @@ struct ExactTokenReference: Codable, Sendable {
     }
 }
 
+struct WebFirstPartyIdentity: Codable, Equatable, Sendable {
+    let emailHash: String?
+    let phoneHash: String?
+
+    init(_ identity: FunnelIdentity) {
+        emailHash = identity.emailHash
+        phoneHash = identity.phoneHash
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case emailHash = "email_hash"
+        case phoneHash = "phone_hash"
+    }
+}
+
 /// Wire contract: UUIDs serialize lowercase (server HMAC derivation + idempotency keys
 /// are lowercase; Swift's UUID.uuidString is uppercase).
 @propertyWrapper
@@ -67,6 +82,9 @@ struct FirstOpenEnvelope: Codable, Sendable {
     let appTransactionJWS: String?
     let asaToken: String?
     let exactTokenReference: ExactTokenReference?
+    let webFirstParty: WebFirstPartyIdentity?
+    let idfa: LowercaseUUID?
+    let idfv: LowercaseUUID?
     let localLineagePresent: Bool
     let localEpochPresent: Bool
     let localSignalsConflict = false
@@ -82,9 +100,34 @@ struct FirstOpenEnvelope: Codable, Sendable {
         case appTransactionJWS = "app_transaction_jws"
         case asaToken = "asa_token"
         case exactTokenReference = "exact_token_ref"
+        case webFirstParty = "web_first_party"
+        case idfa, idfv
         case localLineagePresent = "local_lineage_present"
         case localEpochPresent = "local_epoch_present"
         case localSignalsConflict = "local_signals_conflict"
+    }
+}
+
+struct IdentifyEnvelope: Codable, Sendable {
+    let schemaVersion = 1
+    @LowercaseUUID var installationID: UUID
+    @LowercaseUUID var installEpochID: UUID
+    let occurredAt: Date
+    let emailHash: String?
+    let phoneHash: String?
+    let exactTokenReference: ExactTokenReference?
+    let idfa: LowercaseUUID?
+    let idfv: LowercaseUUID?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case installationID = "installation_id"
+        case installEpochID = "install_epoch_id"
+        case occurredAt = "occurred_at"
+        case emailHash = "email_hash"
+        case phoneHash = "phone_hash"
+        case exactTokenReference = "exact_token_ref"
+        case idfa, idfv
     }
 }
 
@@ -111,7 +154,7 @@ struct EventEnvelope: Codable, Sendable {
     @LowercaseUUID var sessionID: UUID
     let source = "ios_sdk"
     let consent: EventConsent
-    let properties: [String: AttrKitValue]
+    let properties: [String: AttriKitValue]
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -171,14 +214,14 @@ struct AttributionResponse: Decodable, Sendable {
     }
 }
 
-func attrKitJSONEncoder() -> JSONEncoder {
+func attriKitJSONEncoder() -> JSONEncoder {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601WithFractionalSeconds
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     return encoder
 }
 
-func attrKitJSONDecoder() -> JSONDecoder {
+func attriKitJSONDecoder() -> JSONDecoder {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601WithFractionalSeconds
     return decoder

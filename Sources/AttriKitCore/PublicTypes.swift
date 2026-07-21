@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AttrKitConsent: String, Codable, Sendable, CaseIterable {
+public enum AttriKitConsent: String, Codable, Sendable, CaseIterable {
     case unknown
     case measurementGranted = "measurement_granted"
     case trackingGranted = "tracking_granted"
@@ -14,7 +14,7 @@ public enum AttrKitConsent: String, Codable, Sendable, CaseIterable {
     public var allowsTracking: Bool { self == .trackingGranted }
 }
 
-public enum AttrKitValue: Codable, Hashable, Sendable {
+public enum AttriKitValue: Codable, Hashable, Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -24,7 +24,7 @@ public enum AttrKitValue: Codable, Hashable, Sendable {
         if let string = try? value.decode(String.self) { self = .string(string) }
         else if let number = try? value.decode(Double.self) { self = .number(number) }
         else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
-        else { throw DecodingError.typeMismatch(Self.self, .init(codingPath: decoder.codingPath, debugDescription: "AttrKit properties must be scalar strings, numbers, or booleans")) }
+        else { throw DecodingError.typeMismatch(Self.self, .init(codingPath: decoder.codingPath, debugDescription: "AttriKit properties must be scalar strings, numbers, or booleans")) }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -37,31 +37,31 @@ public enum AttrKitValue: Codable, Hashable, Sendable {
     }
 }
 
-extension AttrKitValue: ExpressibleByStringLiteral {
+extension AttriKitValue: ExpressibleByStringLiteral {
     public init(stringLiteral value: String) { self = .string(value) }
 }
 
-extension AttrKitValue: ExpressibleByIntegerLiteral {
+extension AttriKitValue: ExpressibleByIntegerLiteral {
     public init(integerLiteral value: Int) { self = .number(Double(value)) }
 }
 
-extension AttrKitValue: ExpressibleByFloatLiteral {
+extension AttriKitValue: ExpressibleByFloatLiteral {
     public init(floatLiteral value: Double) { self = .number(value) }
 }
 
-extension AttrKitValue: ExpressibleByBooleanLiteral {
+extension AttriKitValue: ExpressibleByBooleanLiteral {
     public init(booleanLiteral value: Bool) { self = .bool(value) }
 }
 
-public struct AttrKitEvent: Hashable, Sendable {
+public struct AttriKitEvent: Hashable, Sendable {
     public let name: String
     public let version: Int
 
     public init(_ name: String, version: Int = 1) throws {
         guard name.range(of: #"^[a-z][a-z0-9_.-]{0,127}$"#, options: .regularExpression) != nil else {
-            throw AttrKitError.invalidEventName
+            throw AttriKitError.invalidEventName
         }
-        guard version > 0 else { throw AttrKitError.invalidEventVersion }
+        guard version > 0 else { throw AttriKitError.invalidEventVersion }
         self.name = name
         self.version = version
     }
@@ -105,7 +105,7 @@ public enum DeepLinkResult: Equatable, Sendable {
     case invalid
 }
 
-public enum AttrKitError: Error, Equatable, Sendable {
+public enum AttriKitError: Error, Equatable, Sendable {
     case invalidAPIKey
     case invalidEventName
     case invalidEventVersion

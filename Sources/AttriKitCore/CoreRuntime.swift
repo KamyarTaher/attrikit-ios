@@ -3,51 +3,75 @@ import Foundation
 import BackgroundTasks
 #endif
 
-struct AttrKitTestingConfiguration: Sendable {
+private final class EvidenceResultRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
+
+    init(continuation: CheckedContinuation<String?, Never>) {
+        self.continuation = continuation
+    }
+
+    func resolve(with result: String?) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(returning: result)
+    }
+}
+
+struct AttriKitTestingConfiguration: Sendable {
     let baseURL: URL
     let transport: HTTPTransport
     let storage: SDKStorage
     let evidence: PlatformEvidenceProviding
+    let deviceEvidence: @Sendable () -> DeviceEvidence
     let now: @Sendable () -> Date
 
-    static let live = AttrKitTestingConfiguration(
+    static let live = AttriKitTestingConfiguration(
         baseURL: liveEndpoint(),
         transport: URLSessionTransport(),
         storage: SDKStorage(),
         evidence: ApplePlatformEvidenceProvider(),
+        deviceEvidence: { AttriKit.currentDeviceEvidence() },
         now: { Date() }
     )
 
-    /// The ingestion endpoint comes from the host app's Info.plist (`AttrKitEndpoint`) —
+    /// The ingestion endpoint comes from the host app's Info.plist (`AttriKitEndpoint`) —
     /// the SDK ships no compiled-in hostname (base-URL portability; the production domain
     /// is not final). A missing/invalid key resolves to a reserved `.invalid` host so
     /// requests fail fast and visibly instead of silently targeting a wrong server.
     private static func liveEndpoint() -> URL {
         #if DEBUG
-        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttrKitEndpoint") as? String, let url = URL(string: raw), url.scheme == "http", ["127.0.0.1", "localhost"].contains(url.host ?? "") { return url }
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttriKitEndpoint") as? String, let url = URL(string: raw), url.scheme == "http", ["127.0.0.1", "localhost"].contains(url.host ?? "") { return url }
         #endif
-        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttrKitEndpoint") as? String,
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttriKitEndpoint") as? String,
            let url = URL(string: raw), url.scheme == "https" {
             return url
         }
-        return URL(string: "https://attrkit-endpoint-not-configured.invalid")!
+        return URL(string: "https://attrikit-endpoint-not-configured.invalid")
+            ?? URL(fileURLWithPath: "/attrikit-endpoint-not-configured")
     }
 }
 
 private struct BufferedEvent: Sendable {
-    let event: AttrKitEvent
-    let properties: [String: AttrKitValue]
+    let event: AttriKitEvent
+    let properties: [String: AttriKitValue]
     let occurredAt: Date
 }
 
 actor CoreRuntime {
-    private let configuration: AttrKitTestingConfiguration
+    private let configuration: AttriKitTestingConfiguration
     private var apiKey: String?
-    private var consent: AttrKitConsent = .unknown
+    private var consent: AttriKitConsent = .unknown
     private var identity: InstallationIdentity?
     private var sessionID = UUID()
     private var bufferedBeforeStart: [BufferedEvent] = []
     private var pendingUserID: String?
+    private var funnelIdentity = FunnelIdentity()
     private var exactToken: ExactTokenReference?
     private var attributionCache: AttributionResult?
     private var firstOpenTask: Task<Void, Never>?
@@ -55,11 +79,11 @@ actor CoreRuntime {
     private var queueTask: Task<Void, Never>?
     private var attributionETag: String?
 
-    init(configuration: AttrKitTestingConfiguration) {
+    init(configuration: AttriKitTestingConfiguration) {
         self.configuration = configuration
     }
 
-    func start(apiKey: String, consent: AttrKitConsent) async {
+    func start(apiKey: String, consent: AttriKitConsent) async {
         guard self.apiKey == nil else {
             if self.consent != consent { await setConsent(consent) }
             return
@@ -75,7 +99,7 @@ actor CoreRuntime {
         await beginMeasurement()
     }
 
-    func setConsent(_ newConsent: AttrKitConsent) async {
+    func setConsent(_ newConsent: AttriKitConsent) async {
         let previous = consent
         consent = newConsent
         await configuration.storage.storeConsent(newConsent)
@@ -91,7 +115,7 @@ actor CoreRuntime {
         }
     }
 
-    func track(_ event: AttrKitEvent, properties: [String: AttrKitValue]) async {
+    func track(_ event: AttriKitEvent, properties: [String: AttriKitValue]) async {
         guard (try? validateProperties(properties)) != nil else { return }
         let now = configuration.now()
         guard apiKey != nil else {
@@ -126,7 +150,7 @@ actor CoreRuntime {
     }
 
     func acceptExactToken(_ token: String, kind: String) async -> DeepLinkResult {
-        guard (16...512).contains(token.utf8.count),
+        guard Self.isVersionedLinkToken(token),
               ["clipboard", "owned_deferred", "customer_signed"].contains(kind) else { return .invalid }
         if kind == "clipboard" {
             guard consent.allowsTracking else { return .consentRequired }
@@ -134,10 +158,28 @@ actor CoreRuntime {
             guard consent.allowsMeasurement else { return .consentRequired }
         }
         exactToken = ExactTokenReference(token: token, kind: kind, clipboardOptIn: kind == "clipboard" ? true : nil)
-        return .handled(URL(string: "attrkit://token/consumed")!)
+        await submitIdentify()
+        var consumedTokenURL = URLComponents()
+        consumedTokenURL.scheme = "attrikit"
+        consumedTokenURL.host = "token"
+        consumedTokenURL.path = "/consumed"
+        guard let url = consumedTokenURL.url else { return .invalid }
+        return .handled(url)
     }
 
     func canReadLinkTokenPasteboard() -> Bool { consent.allowsTracking }
+
+    private static func isVersionedLinkToken(_ token: String) -> Bool {
+        let bytes = token.utf8
+        guard bytes.count == 47, token.hasPrefix("ak1_") else { return false }
+        return bytes.dropFirst(4).allSatisfy { byte in
+            (48...57).contains(byte)
+                || (65...90).contains(byte)
+                || (97...122).contains(byte)
+                || byte == 45
+                || byte == 95
+        }
+    }
 
     func setUserID(_ opaqueID: String?) async {
         let sanitized = opaqueID.flatMap { value -> String? in
@@ -150,11 +192,21 @@ actor CoreRuntime {
         await configuration.storage.setUserID(sanitized)
     }
 
+    func setFunnelIdentity(_ identity: FunnelIdentity) async {
+        funnelIdentity = identity
+        await submitIdentify()
+    }
+
+    func refreshTrackingEvidence() async {
+        await submitIdentify()
+    }
+
     func deleteData() async throws {
         defer {
             identity = nil
             attributionCache = nil
             exactToken = nil
+            funnelIdentity = FunnelIdentity()
             bufferedBeforeStart.removeAll()
         }
         firstOpenTask?.cancel()
@@ -163,7 +215,7 @@ actor CoreRuntime {
 
         var responseStatus: Int?
         if let apiKey, let identity {
-            let body = try attrKitJSONEncoder().encode([
+            let body = try attriKitJSONEncoder().encode([
                 "installation_id": identity.installationID.uuidString.lowercased(),
                 "install_epoch_id": identity.installEpochID.uuidString.lowercased(),
             ])
@@ -173,7 +225,7 @@ actor CoreRuntime {
         }
         try await configuration.storage.deleteAll()
         if let responseStatus, !(200..<300).contains(responseStatus) {
-            throw AttrKitError.deletionFailed(responseStatus)
+            throw AttriKitError.deletionFailed(responseStatus)
         }
     }
 
@@ -191,7 +243,11 @@ actor CoreRuntime {
             return
         }
         guard let identity else { return }
-        if let pendingUserID { await configuration.storage.setUserID(pendingUserID) }
+        if let pendingUserID {
+            await configuration.storage.setUserID(pendingUserID)
+        } else {
+            pendingUserID = await configuration.storage.storedUserID()
+        }
         let pending = bufferedBeforeStart
         bufferedBeforeStart.removeAll()
         for buffered in pending {
@@ -201,7 +257,7 @@ actor CoreRuntime {
         scheduleQueueFlush()
     }
 
-    private func enqueue(_ event: AttrKitEvent, properties: [String: AttrKitValue], occurredAt: Date, identity: InstallationIdentity) async {
+    private func enqueue(_ event: AttriKitEvent, properties: [String: AttriKitValue], occurredAt: Date, identity: InstallationIdentity) async {
         let envelope = EventEnvelope(
             eventID: UUID(),
             eventName: event.name,
@@ -228,8 +284,9 @@ actor CoreRuntime {
         // simulators/sandboxes (it does not throw), and a slow StoreKit must never delay the
         // first-open envelope — click-to-install timing is the product's accuracy substrate.
         let evidence = configuration.evidence
-        async let transaction = Self.boundedEvidence(seconds: 5) { await evidence.appTransactionJWS() }
-        async let adServices = Self.boundedEvidence(seconds: 5) { await evidence.adServicesToken() }
+        let deviceEvidence = configuration.deviceEvidence()
+        async let transaction = Self.boundedEvidence { await evidence.appTransactionJWS() }
+        async let adServices = Self.boundedEvidence { await evidence.adServicesToken() }
         let envelope = FirstOpenEnvelope(
             installationID: identity.installationID,
             installEpochID: identity.installEpochID,
@@ -240,22 +297,25 @@ actor CoreRuntime {
             appTransactionJWS: await transaction,
             asaToken: await adServices,
             exactTokenReference: exactToken,
+            webFirstParty: funnelIdentity.isEmpty ? nil : WebFirstPartyIdentity(funnelIdentity),
+            idfa: deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)),
+            idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:)),
             localLineagePresent: identity.localLineagePresent,
             localEpochPresent: identity.localEpochPresent
         )
         do {
-            let data = try attrKitJSONEncoder().encode(envelope)
+            let data = try attriKitJSONEncoder().encode(envelope)
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/first-open", body: data, idempotencyKey: identity.installEpochID.uuidString.lowercased())
             let response = try await configuration.transport.send(request)
             guard consent.allowsMeasurement else { return }
             switch response.statusCode {
             case 200:
-                let decoded = try attrKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
+                let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
                 attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
                 try? await configuration.storage.setRetryState(nil)
             case 202:
-                let decoded = try attrKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
+                let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
                 startPolling(after: decoded.retryAfterMilliseconds ?? 500)
                 try? await configuration.storage.setRetryState(nil)
             case 204:
@@ -270,6 +330,27 @@ actor CoreRuntime {
         } catch {
             await scheduleFirstOpenRetry()
         }
+    }
+
+    private func submitIdentify() async {
+        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        let deviceEvidence = configuration.deviceEvidence()
+        guard !funnelIdentity.isEmpty || exactToken != nil
+                || deviceEvidence.idfa != nil || deviceEvidence.idfv != nil else { return }
+        let envelope = IdentifyEnvelope(
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            occurredAt: configuration.now(),
+            emailHash: funnelIdentity.emailHash,
+            phoneHash: funnelIdentity.phoneHash,
+            exactTokenReference: exactToken,
+            idfa: deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)),
+            idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:))
+        )
+        guard let body = try? attriKitJSONEncoder().encode(envelope) else { return }
+        let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+            .post(path: "v1/ingest/identify", body: body, idempotencyKey: UUID().uuidString.lowercased())
+        _ = try? await configuration.transport.send(request)
     }
 
     private func startPolling(after milliseconds: Int) {
@@ -297,7 +378,7 @@ actor CoreRuntime {
             if let etag = response.headers["etag"] { attributionETag = etag }
             switch response.statusCode {
             case 200:
-                let decoded = try attrKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
+                let decoded = try attriKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
                 attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
             case 204:
                 attributionCache = .unattributed
@@ -337,12 +418,13 @@ actor CoreRuntime {
         for index in events.indices { events[index].sentAt = sentAt }
         let batchID = UUID().uuidString.lowercased()
         do {
-            let data = try attrKitJSONEncoder().encode(EventBatch(batchID: batchID, events: events))
+            let data = try attriKitJSONEncoder().encode(EventBatch(batchID: batchID, events: events))
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/events:batch", body: data, idempotencyKey: batchID)
             let response = try await configuration.transport.send(request)
             guard consent.allowsMeasurement else { return .empty }
-            if (200..<300).contains(response.statusCode) || (400..<500).contains(response.statusCode) && response.statusCode != 429 {
+            let permanentRejections: Set<Int> = [400, 404, 409, 413, 422]
+            if (200..<300).contains(response.statusCode) || permanentRejections.contains(response.statusCode) {
                 try await configuration.storage.removeEvents(ids: Set(events.map(\.eventID)))
                 return .sent
             }
@@ -364,7 +446,7 @@ actor CoreRuntime {
                 consent: ConsentPayload(state: consent, policyVersion: 1),
                 occurredAt: configuration.now()
             )
-            guard let body = try? attrKitJSONEncoder().encode(payload) else { return }
+            guard let body = try? attriKitJSONEncoder().encode(payload) else { return }
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/consent", body: body, idempotencyKey: UUID().uuidString.lowercased())
             _ = try? await configuration.transport.send(request)
@@ -408,7 +490,7 @@ actor CoreRuntime {
 
     private nonisolated func requestBackgroundRetry(earliest: Date) {
         #if os(iOS)
-        let request = BGProcessingTaskRequest(identifier: "io.attrkit.sdk.retry")
+        let request = BGProcessingTaskRequest(identifier: "io.attrikit.sdk.retry")
         request.earliestBeginDate = earliest
         request.requiresNetworkConnectivity = true
         try? BGTaskScheduler.shared.submit(request)
@@ -416,16 +498,16 @@ actor CoreRuntime {
     }
 
     /// Races a best-effort evidence provider against a wall-clock bound; nil on timeout.
-    private static func boundedEvidence(seconds: Int, _ operation: @escaping @Sendable () async -> String?) async -> String? {
-        await withTaskGroup(of: String?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(seconds))
-                return nil
+    private static func boundedEvidence(seconds: Int = 2, _ operation: @escaping @Sendable () async -> String?) async -> String? {
+        await withCheckedContinuation { continuation in
+            let race = EvidenceResultRace(continuation: continuation)
+            Task {
+                race.resolve(with: await operation())
             }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                race.resolve(with: nil)
+            }
         }
     }
 
@@ -440,6 +522,7 @@ actor CoreRuntime {
         identity = nil
         exactToken = nil
         pendingUserID = nil
+        funnelIdentity = FunnelIdentity()
         try? await configuration.storage.wipeQueue()
         await configuration.storage.setUserID(nil)
         try? await configuration.storage.setRetryState(nil)

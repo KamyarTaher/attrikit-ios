@@ -1,17 +1,18 @@
 import Foundation
 
-public enum AttrKit {
-    private static let facade = AttrKitFacade()
+public enum AttriKit {
+    private static let facade = AttriKitFacade()
+    private static let deviceEvidenceRegistry = DeviceEvidenceRegistry()
 
-    public static func start(apiKey: String, consent: AttrKitConsent) {
+    public static func start(apiKey: String, consent: AttriKitConsent) {
         facade.enqueue { core in await core.start(apiKey: apiKey, consent: consent) }
     }
 
-    public static func setConsent(_ consent: AttrKitConsent) {
+    public static func setConsent(_ consent: AttriKitConsent) {
         facade.enqueue { core in await core.setConsent(consent) }
     }
 
-    public static func track(_ event: AttrKitEvent, properties: [String: AttrKitValue] = [:]) {
+    public static func track(_ event: AttriKitEvent, properties: [String: AttriKitValue] = [:]) {
         facade.enqueue { core in await core.track(event, properties: properties) }
     }
 
@@ -27,26 +28,83 @@ public enum AttrKit {
         facade.enqueue { core in await core.setUserID(opaqueID) }
     }
 
+    /// Supplies first-party funnel identifiers for deterministic matching.
+    ///
+    /// Values are normalized and SHA-256 hashed synchronously on-device. The raw
+    /// email address and phone number are never persisted or captured by async work.
+    public static func setFunnelIdentity(email: String? = nil, phone: String? = nil) {
+        let identity = FunnelIdentity(email: email, phone: phone)
+        facade.enqueue { core in await core.setFunnelIdentity(identity) }
+    }
+
     public static func deleteData() async throws {
         try await facade.withRuntimeThrowing { core in try await core.deleteData() }
     }
 
-    @_spi(AttrKitLinkToken)
+    @_spi(AttriKitLinkToken)
+    /// Accepts an exact deferred-link token minted by the server in `ak1_`-prefixed form.
     public static func acceptExplicitLinkToken(_ token: String, kind: String = "clipboard") async -> DeepLinkResult {
         await facade.withRuntime { core in await core.acceptExactToken(token, kind: kind) }
     }
 
-    @_spi(AttrKitLinkToken)
+    @_spi(AttriKitLinkToken)
     public static func canReadLinkTokenPasteboard() async -> Bool {
         await facade.withRuntime { core in await core.canReadLinkTokenPasteboard() }
     }
 
-    static func configureForTesting(_ configuration: AttrKitTestingConfiguration) async {
+    @_spi(AttriKitTracking)
+    public static func registerTrackingEvidenceProvider(
+        advertisingIdentifier: @escaping @Sendable () -> UUID?,
+        vendorIdentifier: @escaping @Sendable () -> UUID?
+    ) {
+        deviceEvidenceRegistry.install(
+            advertisingIdentifier: advertisingIdentifier,
+            vendorIdentifier: vendorIdentifier
+        )
+    }
+
+    @_spi(AttriKitTracking)
+    public static func refreshTrackingEvidence() {
+        facade.enqueue { core in await core.refreshTrackingEvidence() }
+    }
+
+    static func currentDeviceEvidence() -> DeviceEvidence {
+        deviceEvidenceRegistry.current()
+    }
+
+    static func configureForTesting(_ configuration: AttriKitTestingConfiguration) async {
         await facade.replace(with: CoreRuntime(configuration: configuration))
     }
 }
 
-private final class AttrKitFacade: @unchecked Sendable {
+private final class DeviceEvidenceRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var advertisingIdentifier: @Sendable () -> UUID? = { nil }
+    private var vendorIdentifier: @Sendable () -> UUID? = { nil }
+
+    func install(
+        advertisingIdentifier: @escaping @Sendable () -> UUID?,
+        vendorIdentifier: @escaping @Sendable () -> UUID?
+    ) {
+        lock.lock()
+        self.advertisingIdentifier = advertisingIdentifier
+        self.vendorIdentifier = vendorIdentifier
+        lock.unlock()
+    }
+
+    func current() -> DeviceEvidence {
+        let providers = locked { (advertisingIdentifier, vendorIdentifier) }
+        return DeviceEvidence(idfa: providers.0(), idfv: providers.1())
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+private final class AttriKitFacade: @unchecked Sendable {
     private let lock = NSLock()
     private var runtime = CoreRuntime(configuration: .live)
     private var tail: Task<Void, Never>?
