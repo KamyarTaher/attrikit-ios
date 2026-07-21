@@ -1,0 +1,475 @@
+import Foundation
+#if os(iOS)
+import BackgroundTasks
+#endif
+
+struct AttrKitTestingConfiguration: Sendable {
+    let baseURL: URL
+    let transport: HTTPTransport
+    let storage: SDKStorage
+    let evidence: PlatformEvidenceProviding
+    let now: @Sendable () -> Date
+
+    static let live = AttrKitTestingConfiguration(
+        baseURL: liveEndpoint(),
+        transport: URLSessionTransport(),
+        storage: SDKStorage(),
+        evidence: ApplePlatformEvidenceProvider(),
+        now: { Date() }
+    )
+
+    /// The ingestion endpoint comes from the host app's Info.plist (`AttrKitEndpoint`) —
+    /// the SDK ships no compiled-in hostname (base-URL portability; the production domain
+    /// is not final). A missing/invalid key resolves to a reserved `.invalid` host so
+    /// requests fail fast and visibly instead of silently targeting a wrong server.
+    private static func liveEndpoint() -> URL {
+        #if DEBUG
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttrKitEndpoint") as? String, let url = URL(string: raw), url.scheme == "http", ["127.0.0.1", "localhost"].contains(url.host ?? "") { return url }
+        #endif
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "AttrKitEndpoint") as? String,
+           let url = URL(string: raw), url.scheme == "https" {
+            return url
+        }
+        return URL(string: "https://attrkit-endpoint-not-configured.invalid")!
+    }
+}
+
+private struct BufferedEvent: Sendable {
+    let event: AttrKitEvent
+    let properties: [String: AttrKitValue]
+    let occurredAt: Date
+}
+
+actor CoreRuntime {
+    private let configuration: AttrKitTestingConfiguration
+    private var apiKey: String?
+    private var consent: AttrKitConsent = .unknown
+    private var identity: InstallationIdentity?
+    private var sessionID = UUID()
+    private var bufferedBeforeStart: [BufferedEvent] = []
+    private var pendingUserID: String?
+    private var exactToken: ExactTokenReference?
+    private var attributionCache: AttributionResult?
+    private var firstOpenTask: Task<Void, Never>?
+    private var pollTask: Task<Void, Never>?
+    private var queueTask: Task<Void, Never>?
+    private var attributionETag: String?
+
+    init(configuration: AttrKitTestingConfiguration) {
+        self.configuration = configuration
+    }
+
+    func start(apiKey: String, consent: AttrKitConsent) async {
+        guard self.apiKey == nil else {
+            if self.consent != consent { await setConsent(consent) }
+            return
+        }
+        guard (16...512).contains(apiKey.utf8.count) else { return }
+        self.apiKey = apiKey
+        self.consent = consent
+        await configuration.storage.storeConsent(consent)
+        guard consent.allowsMeasurement else {
+            if consent == .denied || consent == .revoked { await stopAndWipe() }
+            return
+        }
+        await beginMeasurement()
+    }
+
+    func setConsent(_ newConsent: AttrKitConsent) async {
+        let previous = consent
+        consent = newConsent
+        await configuration.storage.storeConsent(newConsent)
+        if newConsent == .denied || newConsent == .revoked {
+            await stopAndWipe()
+            return
+        }
+        guard newConsent.allowsMeasurement, apiKey != nil else { return }
+        if !previous.allowsMeasurement {
+            await beginMeasurement()
+        } else if previous != newConsent {
+            scheduleConsentReceipt(scope: "tracking")
+        }
+    }
+
+    func track(_ event: AttrKitEvent, properties: [String: AttrKitValue]) async {
+        guard (try? validateProperties(properties)) != nil else { return }
+        let now = configuration.now()
+        guard apiKey != nil else {
+            bufferedBeforeStart.append(BufferedEvent(event: event, properties: properties, occurredAt: now))
+            if bufferedBeforeStart.count > 100 { bufferedBeforeStart.removeFirst() }
+            return
+        }
+        guard consent.allowsMeasurement, let identity else { return }
+        await enqueue(event, properties: properties, occurredAt: now, identity: identity)
+    }
+
+    func attribution(timeout: Duration) async -> AttributionResult {
+        guard apiKey != nil else { return .notStarted }
+        guard consent.allowsMeasurement else { return .consentRequired }
+        if let attributionCache { return attributionCache }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if let attributionCache { return attributionCache }
+            if Task.isCancelled { return .failed }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return attributionCache ?? .timedOut
+    }
+
+    func handle(_ url: URL) async -> DeepLinkResult {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let token = components.queryItems?.first(where: { $0.name == "attrkit_token" })?.value else {
+            return .ignored
+        }
+        return await acceptExactToken(token, kind: "owned_deferred")
+    }
+
+    func acceptExactToken(_ token: String, kind: String) async -> DeepLinkResult {
+        guard (16...512).contains(token.utf8.count),
+              ["clipboard", "owned_deferred", "customer_signed"].contains(kind) else { return .invalid }
+        if kind == "clipboard" {
+            guard consent.allowsTracking else { return .consentRequired }
+        } else {
+            guard consent.allowsMeasurement else { return .consentRequired }
+        }
+        exactToken = ExactTokenReference(token: token, kind: kind, clipboardOptIn: kind == "clipboard" ? true : nil)
+        return .handled(URL(string: "attrkit://token/consumed")!)
+    }
+
+    func canReadLinkTokenPasteboard() -> Bool { consent.allowsTracking }
+
+    func setUserID(_ opaqueID: String?) async {
+        let sanitized = opaqueID.flatMap { value -> String? in
+            guard !value.isEmpty, value.utf8.count <= 256,
+                  !value.contains("@") else { return nil }
+            return value
+        }
+        pendingUserID = sanitized
+        guard consent.allowsMeasurement else { return }
+        await configuration.storage.setUserID(sanitized)
+    }
+
+    func deleteData() async throws {
+        defer {
+            identity = nil
+            attributionCache = nil
+            exactToken = nil
+            bufferedBeforeStart.removeAll()
+        }
+        firstOpenTask?.cancel()
+        pollTask?.cancel()
+        queueTask?.cancel()
+
+        var responseStatus: Int?
+        if let apiKey, let identity {
+            let body = try attrKitJSONEncoder().encode([
+                "installation_id": identity.installationID.uuidString.lowercased(),
+                "install_epoch_id": identity.installEpochID.uuidString.lowercased(),
+            ])
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+                .post(path: "v1/privacy/delete", body: body, idempotencyKey: identity.installEpochID.uuidString.lowercased())
+            responseStatus = try? await configuration.transport.send(request).statusCode
+        }
+        try await configuration.storage.deleteAll()
+        if let responseStatus, !(200..<300).contains(responseStatus) {
+            throw AttrKitError.deletionFailed(responseStatus)
+        }
+    }
+
+    func shutdown() async {
+        firstOpenTask?.cancel()
+        pollTask?.cancel()
+        queueTask?.cancel()
+    }
+
+    private func beginMeasurement() async {
+        do {
+            identity = try await configuration.storage.initializeIdentities()
+        } catch {
+            attributionCache = .failed
+            return
+        }
+        guard let identity else { return }
+        if let pendingUserID { await configuration.storage.setUserID(pendingUserID) }
+        let pending = bufferedBeforeStart
+        bufferedBeforeStart.removeAll()
+        for buffered in pending {
+            await enqueue(buffered.event, properties: buffered.properties, occurredAt: buffered.occurredAt, identity: identity)
+        }
+        await startOrResumeFirstOpen()
+        scheduleQueueFlush()
+    }
+
+    private func enqueue(_ event: AttrKitEvent, properties: [String: AttrKitValue], occurredAt: Date, identity: InstallationIdentity) async {
+        let envelope = EventEnvelope(
+            eventID: UUID(),
+            eventName: event.name,
+            eventVersion: event.version,
+            occurredAt: occurredAt,
+            sentAt: occurredAt,
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            sessionID: sessionID,
+            consent: eventConsent(),
+            properties: properties
+        )
+        do {
+            _ = try await configuration.storage.enqueue(envelope, now: configuration.now())
+            scheduleQueueFlush()
+        } catch {
+            // Protected revenue events are refused rather than silently evicting an older protected event.
+        }
+    }
+
+    private func submitFirstOpen() async {
+        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        // Platform evidence is best-effort and BOUNDED: AppTransaction.shared can hang on
+        // simulators/sandboxes (it does not throw), and a slow StoreKit must never delay the
+        // first-open envelope — click-to-install timing is the product's accuracy substrate.
+        let evidence = configuration.evidence
+        async let transaction = Self.boundedEvidence(seconds: 5) { await evidence.appTransactionJWS() }
+        async let adServices = Self.boundedEvidence(seconds: 5) { await evidence.adServicesToken() }
+        let envelope = FirstOpenEnvelope(
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            occurredAt: configuration.now(),
+            appVersion: configuration.evidence.appVersion(),
+            coarseContext: configuration.evidence.coarseContext(),
+            consent: ConsentPayload(state: consent, policyVersion: 1),
+            appTransactionJWS: await transaction,
+            asaToken: await adServices,
+            exactTokenReference: exactToken,
+            localLineagePresent: identity.localLineagePresent,
+            localEpochPresent: identity.localEpochPresent
+        )
+        do {
+            let data = try attrKitJSONEncoder().encode(envelope)
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+                .post(path: "v1/ingest/first-open", body: data, idempotencyKey: identity.installEpochID.uuidString.lowercased())
+            let response = try await configuration.transport.send(request)
+            guard consent.allowsMeasurement else { return }
+            switch response.statusCode {
+            case 200:
+                let decoded = try attrKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
+                attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+                try? await configuration.storage.setRetryState(nil)
+            case 202:
+                let decoded = try attrKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
+                startPolling(after: decoded.retryAfterMilliseconds ?? 500)
+                try? await configuration.storage.setRetryState(nil)
+            case 204:
+                startPolling(after: 0)
+                try? await configuration.storage.setRetryState(nil)
+            case 400..<500 where response.statusCode != 429:
+                attributionCache = .failed
+                try? await configuration.storage.setRetryState(nil)
+            default:
+                await scheduleFirstOpenRetry()
+            }
+        } catch {
+            await scheduleFirstOpenRetry()
+        }
+    }
+
+    private func startPolling(after milliseconds: Int) {
+        pollTask?.cancel()
+        pollTask = Task {
+            if milliseconds > 0 { try? await Task.sleep(for: .milliseconds(milliseconds)) }
+            var delay = 250
+            while !Task.isCancelled, self.canUseNetwork() {
+                await self.pollAttributionOnce()
+                if self.hasAttributionResult() { return }
+                let jitter = Int.random(in: 0...max(1, delay / 4))
+                try? await Task.sleep(for: .milliseconds(delay + jitter))
+                delay = min(delay * 2, 5_000)
+            }
+        }
+    }
+
+    private func pollAttributionOnce() async {
+        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        do {
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+                .get(path: "v1/attribution/\(identity.installEpochID.uuidString.lowercased())", etag: attributionETag)
+            let response = try await configuration.transport.send(request)
+            guard consent.allowsMeasurement else { return }
+            if let etag = response.headers["etag"] { attributionETag = etag }
+            switch response.statusCode {
+            case 200:
+                let decoded = try attrKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
+                attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+            case 204:
+                attributionCache = .unattributed
+            case 400..<500 where response.statusCode != 429 && response.statusCode != 304:
+                attributionCache = .failed
+            default:
+                break
+            }
+        } catch {}
+    }
+
+    private func scheduleQueueFlush() {
+        guard queueTask == nil else { return }
+        queueTask = Task {
+            var delayMilliseconds = 1_000
+            while !Task.isCancelled, self.canUseNetwork() {
+                let outcome = await self.flushQueueOnce()
+                if outcome == .empty { break }
+                if outcome == .sent {
+                    delayMilliseconds = 1_000
+                    continue
+                }
+                let jitter = Int.random(in: 0...max(1, delayMilliseconds / 4))
+                try? await Task.sleep(for: .milliseconds(delayMilliseconds + jitter))
+                delayMilliseconds = min(delayMilliseconds * 2, 60_000)
+            }
+            self.clearQueueTask()
+        }
+    }
+
+    private enum QueueFlushOutcome { case empty, sent, retry }
+
+    private func flushQueueOnce() async -> QueueFlushOutcome {
+        guard consent.allowsMeasurement, let apiKey else { return .empty }
+        guard var events = try? await configuration.storage.queuedEvents(now: configuration.now()), !events.isEmpty else { return .empty }
+        let sentAt = configuration.now()
+        for index in events.indices { events[index].sentAt = sentAt }
+        let batchID = UUID().uuidString.lowercased()
+        do {
+            let data = try attrKitJSONEncoder().encode(EventBatch(batchID: batchID, events: events))
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+                .post(path: "v1/ingest/events:batch", body: data, idempotencyKey: batchID)
+            let response = try await configuration.transport.send(request)
+            guard consent.allowsMeasurement else { return .empty }
+            if (200..<300).contains(response.statusCode) || (400..<500).contains(response.statusCode) && response.statusCode != 429 {
+                try await configuration.storage.removeEvents(ids: Set(events.map(\.eventID)))
+                return .sent
+            }
+            return .retry
+        } catch {
+            return .retry
+        }
+    }
+
+    private func clearQueueTask() { queueTask = nil }
+
+    private func scheduleConsentReceipt(scope: String) {
+        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        Task {
+            let payload = ConsentReceipt(
+                installationID: identity.installationID,
+                installEpochID: identity.installEpochID,
+                scope: scope,
+                consent: ConsentPayload(state: consent, policyVersion: 1),
+                occurredAt: configuration.now()
+            )
+            guard let body = try? attrKitJSONEncoder().encode(payload) else { return }
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+                .post(path: "v1/ingest/consent", body: body, idempotencyKey: UUID().uuidString.lowercased())
+            _ = try? await configuration.transport.send(request)
+        }
+    }
+
+    private func scheduleFirstOpenRetry() async {
+        guard consent.allowsMeasurement else { return }
+        let current = await configuration.storage.retryState()
+        let now = configuration.now()
+        let attempt = (current?.attempt ?? 0) + 1
+        guard attempt <= 6, now.timeIntervalSince(current?.firstAttemptAt ?? now) < 86_400 else {
+            attributionCache = .unattributed
+            try? await configuration.storage.setRetryState(nil)
+            return
+        }
+        let delays: [TimeInterval] = [5, 30, 300, 3_600, 10_800, 21_600]
+        let delay = delays[min(attempt - 1, delays.count - 1)]
+        let state = RetryState(attempt: attempt, firstAttemptAt: current?.firstAttemptAt ?? now, nextAttemptAt: now.addingTimeInterval(delay))
+        try? await configuration.storage.setRetryState(state)
+        requestBackgroundRetry(earliest: state.nextAttemptAt)
+        firstOpenTask = Task {
+            try? await Task.sleep(for: .seconds(delay))
+            if !Task.isCancelled { await self.submitFirstOpen() }
+        }
+    }
+
+    private func startOrResumeFirstOpen() async {
+        firstOpenTask?.cancel()
+        if let retry = await configuration.storage.retryState(), retry.nextAttemptAt > configuration.now() {
+            let delay = retry.nextAttemptAt.timeIntervalSince(configuration.now())
+            requestBackgroundRetry(earliest: retry.nextAttemptAt)
+            firstOpenTask = Task {
+                try? await Task.sleep(for: .seconds(delay))
+                if !Task.isCancelled { await self.submitFirstOpen() }
+            }
+        } else {
+            firstOpenTask = Task { await self.submitFirstOpen() }
+        }
+    }
+
+    private nonisolated func requestBackgroundRetry(earliest: Date) {
+        #if os(iOS)
+        let request = BGProcessingTaskRequest(identifier: "io.attrkit.sdk.retry")
+        request.earliestBeginDate = earliest
+        request.requiresNetworkConnectivity = true
+        try? BGTaskScheduler.shared.submit(request)
+        #endif
+    }
+
+    /// Races a best-effort evidence provider against a wall-clock bound; nil on timeout.
+    private static func boundedEvidence(seconds: Int, _ operation: @escaping @Sendable () async -> String?) async -> String? {
+        await withTaskGroup(of: String?.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private func stopAndWipe() async {
+        firstOpenTask?.cancel()
+        pollTask?.cancel()
+        queueTask?.cancel()
+        firstOpenTask = nil
+        pollTask = nil
+        queueTask = nil
+        attributionCache = nil
+        identity = nil
+        exactToken = nil
+        pendingUserID = nil
+        try? await configuration.storage.wipeQueue()
+        await configuration.storage.setUserID(nil)
+        try? await configuration.storage.setRetryState(nil)
+    }
+
+    private func canUseNetwork() -> Bool { consent.allowsMeasurement }
+    private func hasAttributionResult() -> Bool { attributionCache != nil }
+
+    private func eventConsent() -> EventConsent {
+        EventConsent(
+            measurement: consent.allowsMeasurement ? "granted" : "denied",
+            tracking: consent.allowsTracking ? "granted" : (consent == .unknown ? "unknown" : "denied"),
+            policyVersion: 1
+        )
+    }
+}
+
+private struct ConsentReceipt: Codable {
+    let installationID: UUID
+    let installEpochID: UUID
+    let scope: String
+    let consent: ConsentPayload
+    let occurredAt: Date
+    let source = "ios_sdk"
+
+    enum CodingKeys: String, CodingKey {
+        case installationID = "installation_id"
+        case installEpochID = "install_epoch_id"
+        case scope, consent
+        case occurredAt = "occurred_at"
+        case source
+    }
+}
