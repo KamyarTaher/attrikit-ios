@@ -18,7 +18,7 @@ For a package manifest:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.0.0"),
+    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.1.0"),
 ]
 ```
 
@@ -54,6 +54,20 @@ AttriKit.setFunnelIdentity(
 Phone numbers must include a country calling code (a leading `+` or `00` is accepted).
 The hashes are included in the first first-open payload when set before startup and in a
 later identify payload when set after startup.
+
+## Engagement signals
+
+After `AttriKit.start`, core measurement tracks foreground sessions by default. Each
+completed session uses the existing event batch transport to send a `session_end` v1
+event with `duration_ms` and the install-scoped `session_index`. Background interruptions
+of 30 seconds or less retain the current session index; a longer gap starts the next one.
+
+No session event is recorded unless measurement consent allows it. To opt out, disable
+session tracking before startup (or at any later point):
+
+```swift
+AttriKit.setSessionTrackingEnabled(false)
+```
 
 ## App Tracking Transparency (optional)
 

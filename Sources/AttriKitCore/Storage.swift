@@ -114,6 +114,7 @@ actor SDKStorage {
         static let retry = MigratingKey(current: "io.attrikit.first-open-retry", legacy: "io.attrkit.first-open-retry")
         static let userID = MigratingKey(current: "io.attrikit.user-id", legacy: "io.attrkit.user-id")
         static let fallbackInstallation = MigratingKey(current: "io.attrikit.fallback-installation-id", legacy: "io.attrkit.fallback-installation-id")
+        static let sessionIndex = "io.attrikit.session-index"
     }
 
     init(
@@ -218,6 +219,13 @@ actor SDKStorage {
         else { removeValues(for: Key.retry) }
     }
 
+    func nextSessionIndex() -> Int {
+        let current = max(0, defaultsBox.value.integer(forKey: Key.sessionIndex))
+        let next = current == Int.max ? Int.max : current + 1
+        defaultsBox.value.set(next, forKey: Key.sessionIndex)
+        return next
+    }
+
     func retryState() -> RetryState? {
         guard let data = migratedData(for: Key.retry) else { return nil }
         return try? JSONDecoder().decode(RetryState.self, from: data)
@@ -281,6 +289,7 @@ actor SDKStorage {
         removeValues(for: Key.fallbackInstallation)
         removeValues(for: Key.retry)
         removeValues(for: Key.userID)
+        defaultsBox.value.removeObject(forKey: Key.sessionIndex)
         if let firstError { throw firstError }
     }
 

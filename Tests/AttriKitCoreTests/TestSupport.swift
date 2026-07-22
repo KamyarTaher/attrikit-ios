@@ -74,13 +74,60 @@ final class SuspendedEvidence: PlatformEvidenceProviding, @unchecked Sendable {
     }
 }
 
+final class ManualLifecycleObserver: ApplicationLifecycleObserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (ApplicationLifecycleEvent) async -> Void)?
+
+    func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void) {
+        locked { self.handler = handler }
+    }
+
+    func stop() {
+        locked { handler = nil }
+    }
+
+    func send(_ event: ApplicationLifecycleEvent) async {
+        let callback = locked { handler }
+        await callback?(event)
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+final class TestDateClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+
+    init(_ date: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
+        self.date = date
+    }
+
+    func now() -> Date { locked { date } }
+
+    func advance(by interval: TimeInterval) {
+        locked { date = date.addingTimeInterval(interval) }
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
 func makeTestConfiguration(
     transport: HTTPTransport,
     keychain: InstallationIDStoring = MemoryKeychain(),
     defaults: UserDefaults? = nil,
     directory: URL? = nil,
     evidence: PlatformEvidenceProviding = StubEvidence(transaction: nil, adToken: nil),
-    deviceEvidence: DeviceEvidence = DeviceEvidence(idfa: nil, idfv: nil)
+    deviceEvidence: DeviceEvidence = DeviceEvidence(idfa: nil, idfv: nil),
+    now: @escaping @Sendable () -> Date = { Date() },
+    lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver()
 ) -> AttriKitTestingConfiguration {
     let suite = defaults ?? UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
     let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
@@ -90,7 +137,8 @@ func makeTestConfiguration(
         storage: SDKStorage(defaults: .init(value: suite), keychain: keychain, directory: folder),
         evidence: evidence,
         deviceEvidence: { deviceEvidence },
-        now: { Date() }
+        now: now,
+        lifecycle: lifecycle
     )
 }
 

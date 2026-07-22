@@ -12,6 +12,14 @@ public enum AttriKit {
         facade.enqueue { core in await core.setConsent(consent) }
     }
 
+    /// Enables or disables automatic foreground-session measurement.
+    ///
+    /// Session tracking is enabled by default. Disable it before `start` to prevent
+    /// `session_end` events, or change it later to stop or resume future sessions.
+    public static func setSessionTrackingEnabled(_ enabled: Bool) {
+        facade.enqueue { core in await core.setSessionTrackingEnabled(enabled) }
+    }
+
     public static func track(_ event: AttriKitEvent, properties: [String: AttriKitValue] = [:]) {
         facade.enqueue { core in await core.track(event, properties: properties) }
     }
@@ -43,7 +51,7 @@ public enum AttriKit {
 
     @_spi(AttriKitLinkToken)
     /// Accepts an exact deferred-link token minted by the server in `ak1_`-prefixed form.
-    public static func acceptExplicitLinkToken(_ token: String, kind: String = "clipboard") async -> DeepLinkResult {
+    public static func acceptExplicitLinkToken(_ token: String, kind: String = "owned_deferred") async -> DeepLinkResult {
         await facade.withRuntime { core in await core.acceptExactToken(token, kind: kind) }
     }
 

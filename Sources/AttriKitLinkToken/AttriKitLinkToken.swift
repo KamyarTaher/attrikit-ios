@@ -6,7 +6,8 @@ import UIKit
 
 public enum AttriKitLinkToken {
     private static let approvedLinkHosts: Set<String> = [
-        "atk-l.bonega.ai",
+        "attrikit.io",
+        "attrkit.waiverkit.io",
         "localhost",
     ]
 
@@ -17,7 +18,7 @@ public enum AttriKitLinkToken {
         #if os(iOS)
         let value = await MainActor.run { UIPasteboard.general.string }
         return await consumePasteboardValue(value) { token in
-            await AttriKit.acceptExplicitLinkToken(token, kind: "clipboard")
+            await AttriKit.acceptExplicitLinkToken(token, kind: "owned_deferred")
         }
         #else
         return .ignored
@@ -28,7 +29,7 @@ public enum AttriKitLinkToken {
     /// any other clipboard content.
     public static func consume(_ token: String) async -> DeepLinkResult {
         guard await AttriKit.canReadLinkTokenPasteboard() else { return .consentRequired }
-        return await AttriKit.acceptExplicitLinkToken(token, kind: "clipboard")
+        return await AttriKit.acceptExplicitLinkToken(token, kind: "owned_deferred")
     }
 
     static func consumePasteboardValue(

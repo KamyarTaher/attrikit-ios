@@ -62,7 +62,7 @@ final class AttriKitLinkTokenTests: XCTestCase {
     func testConsumePasteboardAcceptsApprovedURLHost() async {
         let spy = TokenAcceptanceSpy()
         let token = "ak1_" + String(repeating: "_", count: 43)
-        let url = "https://atk-l.bonega.ai/install?attrkit_token=\(token)"
+        let url = "https://attrikit.io/install?attrkit_token=\(token)"
 
         let result = await AttriKitLinkToken.consumePasteboardValue(url) { token in
             await spy.accept(token)

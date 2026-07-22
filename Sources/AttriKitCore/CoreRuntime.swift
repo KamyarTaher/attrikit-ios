@@ -30,6 +30,25 @@ struct AttriKitTestingConfiguration: Sendable {
     let evidence: PlatformEvidenceProviding
     let deviceEvidence: @Sendable () -> DeviceEvidence
     let now: @Sendable () -> Date
+    let lifecycle: ApplicationLifecycleObserving
+
+    init(
+        baseURL: URL,
+        transport: HTTPTransport,
+        storage: SDKStorage,
+        evidence: PlatformEvidenceProviding,
+        deviceEvidence: @escaping @Sendable () -> DeviceEvidence,
+        now: @escaping @Sendable () -> Date,
+        lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver()
+    ) {
+        self.baseURL = baseURL
+        self.transport = transport
+        self.storage = storage
+        self.evidence = evidence
+        self.deviceEvidence = deviceEvidence
+        self.now = now
+        self.lifecycle = lifecycle
+    }
 
     static let live = AttriKitTestingConfiguration(
         baseURL: liveEndpoint(),
@@ -37,7 +56,8 @@ struct AttriKitTestingConfiguration: Sendable {
         storage: SDKStorage(),
         evidence: ApplePlatformEvidenceProvider(),
         deviceEvidence: { AttriKit.currentDeviceEvidence() },
-        now: { Date() }
+        now: { Date() },
+        lifecycle: ApplicationLifecycleObserver()
     )
 
     /// The ingestion endpoint comes from the host app's Info.plist (`AttriKitEndpoint`) —
@@ -64,6 +84,13 @@ private struct BufferedEvent: Sendable {
 }
 
 actor CoreRuntime {
+    private struct ActiveSession {
+        let index: Int
+        let startedAt: Date
+    }
+
+    private static let sessionGap: TimeInterval = 30
+
     private let configuration: AttriKitTestingConfiguration
     private var apiKey: String?
     private var consent: AttriKitConsent = .unknown
@@ -78,6 +105,12 @@ actor CoreRuntime {
     private var pollTask: Task<Void, Never>?
     private var queueTask: Task<Void, Never>?
     private var attributionETag: String?
+    private var sessionTrackingEnabled = true
+    private var lifecycleObservationStarted = false
+    private var applicationIsActive = false
+    private var activeSession: ActiveSession?
+    private var lastSessionEndedAt: Date?
+    private var lastSessionIndex: Int?
 
     init(configuration: AttriKitTestingConfiguration) {
         self.configuration = configuration
@@ -92,6 +125,7 @@ actor CoreRuntime {
         self.apiKey = apiKey
         self.consent = consent
         await configuration.storage.storeConsent(consent)
+        startLifecycleObservation()
         guard consent.allowsMeasurement else {
             if consent == .denied || consent == .revoked { await stopAndWipe() }
             return
@@ -104,6 +138,7 @@ actor CoreRuntime {
         consent = newConsent
         await configuration.storage.storeConsent(newConsent)
         if newConsent == .denied || newConsent == .revoked {
+            resetSessionState()
             await stopAndWipe()
             return
         }
@@ -125,6 +160,62 @@ actor CoreRuntime {
         }
         guard consent.allowsMeasurement, let identity else { return }
         await enqueue(event, properties: properties, occurredAt: now, identity: identity)
+    }
+
+    func setSessionTrackingEnabled(_ enabled: Bool) async {
+        sessionTrackingEnabled = enabled
+        if enabled, applicationIsActive {
+            await applicationDidBecomeActive()
+        } else if !enabled {
+            resetSessionState()
+        }
+    }
+
+    func applicationDidBecomeActive() async {
+        applicationIsActive = true
+        guard apiKey != nil, sessionTrackingEnabled, consent.allowsMeasurement, identity != nil else { return }
+        guard activeSession == nil else { return }
+
+        let now = configuration.now()
+        let canResumeRecentSession = lastSessionEndedAt.map {
+            let gap = now.timeIntervalSince($0)
+            return gap >= 0 && gap <= Self.sessionGap
+        } ?? false
+
+        let index: Int
+        if canResumeRecentSession, let lastSessionIndex {
+            index = lastSessionIndex
+        } else {
+            index = await configuration.storage.nextSessionIndex()
+            sessionID = UUID()
+        }
+        activeSession = ActiveSession(index: index, startedAt: now)
+    }
+
+    func applicationWillResignActive() async {
+        applicationIsActive = false
+        guard sessionTrackingEnabled, consent.allowsMeasurement,
+              let identity, let activeSession else { return }
+
+        let endedAt = configuration.now()
+        self.activeSession = nil
+        lastSessionEndedAt = endedAt
+        lastSessionIndex = activeSession.index
+
+        let elapsed = max(0, endedAt.timeIntervalSince(activeSession.startedAt))
+        let roundedMilliseconds = min(Double(Int.max), (elapsed * 1_000).rounded())
+        guard roundedMilliseconds.isFinite,
+              let event = try? AttriKitEvent("session_end", version: 1) else { return }
+        let durationMilliseconds = Int(roundedMilliseconds)
+        await enqueue(
+            event,
+            properties: [
+                "duration_ms": .number(Double(durationMilliseconds)),
+                "session_index": .number(Double(activeSession.index)),
+            ],
+            occurredAt: endedAt,
+            identity: identity
+        )
     }
 
     func attribution(timeout: Duration) async -> AttributionResult {
@@ -230,6 +321,10 @@ actor CoreRuntime {
     }
 
     func shutdown() async {
+        configuration.lifecycle.stop()
+        lifecycleObservationStarted = false
+        applicationIsActive = false
+        resetSessionState()
         firstOpenTask?.cancel()
         pollTask?.cancel()
         queueTask?.cancel()
@@ -255,6 +350,27 @@ actor CoreRuntime {
         }
         await startOrResumeFirstOpen()
         scheduleQueueFlush()
+        if applicationIsActive { await applicationDidBecomeActive() }
+    }
+
+    private func startLifecycleObservation() {
+        guard !lifecycleObservationStarted else { return }
+        lifecycleObservationStarted = true
+        configuration.lifecycle.start { [weak self] event in
+            guard let self else { return }
+            switch event {
+            case .didBecomeActive:
+                await self.applicationDidBecomeActive()
+            case .willResignActive:
+                await self.applicationWillResignActive()
+            }
+        }
+    }
+
+    private func resetSessionState() {
+        activeSession = nil
+        lastSessionEndedAt = nil
+        lastSessionIndex = nil
     }
 
     private func enqueue(_ event: AttriKitEvent, properties: [String: AttriKitValue], occurredAt: Date, identity: InstallationIdentity) async {
@@ -298,7 +414,11 @@ actor CoreRuntime {
             asaToken: await adServices,
             exactTokenReference: exactToken,
             webFirstParty: funnelIdentity.isEmpty ? nil : WebFirstPartyIdentity(funnelIdentity),
-            idfa: deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)),
+            // Server rule (firstOpenEnvelopeSchema refine): idfa requires
+            // tracking_granted — sending it under measurement consent is a 422
+            // and the first-open is permanently lost. Gate client-side on the
+            // same rule. IDFV is consent-free. (wire-review P0-1, 2026-07-22)
+            idfa: consent.allowsTracking ? deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)) : nil,
             idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:)),
             localLineagePresent: identity.localLineagePresent,
             localEpochPresent: identity.localEpochPresent
@@ -344,7 +464,9 @@ actor CoreRuntime {
             emailHash: funnelIdentity.emailHash,
             phoneHash: funnelIdentity.phoneHash,
             exactTokenReference: exactToken,
-            idfa: deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)),
+            // Same consent gate as first-open (wire-review P1-1): the identifier must
+            // never travel without ATT authorization, even if the server would drop it.
+            idfa: consent.allowsTracking ? deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)) : nil,
             idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:))
         )
         guard let body = try? attriKitJSONEncoder().encode(envelope) else { return }
@@ -523,6 +645,7 @@ actor CoreRuntime {
         exactToken = nil
         pendingUserID = nil
         funnelIdentity = FunnelIdentity()
+        resetSessionState()
         try? await configuration.storage.wipeQueue()
         await configuration.storage.setUserID(nil)
         try? await configuration.storage.setRetryState(nil)
