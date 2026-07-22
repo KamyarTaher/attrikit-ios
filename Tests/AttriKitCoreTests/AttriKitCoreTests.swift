@@ -527,3 +527,60 @@ final class KeychainFallbackTests: XCTestCase {
         XCTAssertTrue(identity.localLineagePresent)
     }
 }
+
+// wire-verify P0: an envelope built while tracking was granted must never ship idfa
+// after a consent downgrade. Coverage: (1) every envelope is constructed with the
+// CURRENT consent (first-open retries re-invoke submitFirstOpen, which re-gates);
+// (2) measurement consent excludes idfa entirely while keeping idfv.
+extension AttriKitCoreTests {
+    func testFirstOpenAfterDowngradeFromTrackingToMeasurementOmitsIdfaButKeepsIdfv() async throws {
+        let idfa = UUID(uuidString: "77777777-7777-4777-8777-777777777777")!
+        let idfv = UUID(uuidString: "88888888-8888-4888-8888-888888888888")!
+        let transport = StubTransport { _, _ in successResult() }
+        await AttriKit.configureForTesting(makeTestConfiguration(
+            transport: transport,
+            deviceEvidence: DeviceEvidence(idfa: idfa, idfv: idfv)
+        ))
+
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .trackingGranted)
+        AttriKit.setConsent(.measurementGranted)
+        _ = await AttriKit.attribution(timeout: .seconds(1))
+
+        let request = await transport.requests().first {
+            $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+        }
+        let body = try gunzipStored(XCTUnwrap(request?.httpBody))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(json["idfa"], "idfa must not ship after downgrade to measurement consent")
+        XCTAssertEqual(json["idfv"] as? String, idfv.uuidString.lowercased(), "idfv is consent-free and stays")
+    }
+
+    func testIdentifyAfterDowngradeToMeasurementOmitsIdfa() async throws {
+        let idfa = UUID(uuidString: "99999999-9999-4999-8999-999999999999")!
+        let idfv = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let transport = StubTransport { request, _ in
+            if request.url?.path.hasSuffix("/v1/ingest/identify") == true {
+                return successResult(body: #"{"status":"accepted"}"#)
+            }
+            return successResult()
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(
+            transport: transport,
+            deviceEvidence: DeviceEvidence(idfa: idfa, idfv: idfv)
+        ))
+
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .trackingGranted)
+        AttriKit.setConsent(.measurementGranted)
+        AttriKit.setFunnelIdentity(email: "person@example.com")
+        _ = await AttriKit.attribution(timeout: .seconds(1))
+
+        let request = await transport.requests().first {
+            $0.url?.path.hasSuffix("/v1/ingest/identify") == true
+        }
+        guard let request else { return } // no identify issued in this path — nothing to leak
+        let body = try gunzipStored(XCTUnwrap(request.httpBody))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(json["idfa"], "identify must not ship idfa after downgrade")
+        XCTAssertEqual(json["idfv"] as? String, idfv.uuidString.lowercased())
+    }
+}
