@@ -111,6 +111,9 @@ actor CoreRuntime {
     private var activeSession: ActiveSession?
     private var lastSessionEndedAt: Date?
     private var lastSessionIndex: Int?
+    private var deletionPending = false
+    private var activeNetworkRequestCount = 0
+    private var networkQuiescenceWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(configuration: AttriKitTestingConfiguration) {
         self.configuration = configuration
@@ -122,12 +125,26 @@ actor CoreRuntime {
             return
         }
         guard (16...512).contains(apiKey.utf8.count) else { return }
+        try? await configuration.storage.recoverPendingRevocationIfNeeded()
+        let previouslyStoredConsent = await configuration.storage.storedConsent()
         self.apiKey = apiKey
         self.consent = consent
-        await configuration.storage.storeConsent(consent)
         startLifecycleObservation()
+        if await configuration.storage.deletionTombstone() != nil {
+            deletionPending = true
+            bufferedBeforeStart.removeAll()
+            return
+        }
+        if consent == .revoked, previouslyStoredConsent != .revoked {
+            try? await configuration.storage.beginRevocationTransition()
+            await stopAndWipe(finalizeRevocation: true)
+            return
+        }
+        await configuration.storage.storeConsent(consent)
         guard consent.allowsMeasurement else {
-            if consent == .denied || consent == .revoked { await stopAndWipe() }
+            if consent == .denied || consent == .revoked {
+                await stopAndWipe(finalizeRevocation: false)
+            }
             return
         }
         await beginMeasurement()
@@ -136,13 +153,24 @@ actor CoreRuntime {
     func setConsent(_ newConsent: AttriKitConsent) async {
         let previous = consent
         consent = newConsent
-        await configuration.storage.storeConsent(newConsent)
-        if newConsent == .denied || newConsent == .revoked {
+        if newConsent == .revoked {
+            let startsRevocation = !deletionPending && previous != .revoked
+            if startsRevocation {
+                try? await configuration.storage.beginRevocationTransition()
+            } else {
+                await configuration.storage.storeConsent(newConsent)
+            }
             resetSessionState()
-            await stopAndWipe()
+            await stopAndWipe(finalizeRevocation: startsRevocation)
             return
         }
-        guard newConsent.allowsMeasurement, apiKey != nil else { return }
+        await configuration.storage.storeConsent(newConsent)
+        if newConsent == .denied {
+            resetSessionState()
+            await stopAndWipe(finalizeRevocation: false)
+            return
+        }
+        guard newConsent.allowsMeasurement, apiKey != nil, !deletionPending else { return }
         if !previous.allowsMeasurement {
             await beginMeasurement()
         } else if previous != newConsent {
@@ -158,7 +186,7 @@ actor CoreRuntime {
             if bufferedBeforeStart.count > 100 { bufferedBeforeStart.removeFirst() }
             return
         }
-        guard consent.allowsMeasurement, let identity else { return }
+        guard !deletionPending, consent.allowsMeasurement, let identity else { return }
         await enqueue(event, properties: properties, occurredAt: now, identity: identity)
     }
 
@@ -220,6 +248,7 @@ actor CoreRuntime {
 
     func attribution(timeout: Duration) async -> AttributionResult {
         guard apiKey != nil else { return .notStarted }
+        guard !deletionPending else { return .failed }
         guard consent.allowsMeasurement else { return .consentRequired }
         if let attributionCache { return attributionCache }
         let clock = ContinuousClock()
@@ -243,11 +272,13 @@ actor CoreRuntime {
     func acceptExactToken(_ token: String, kind: String) async -> DeepLinkResult {
         guard Self.isVersionedLinkToken(token),
               ["clipboard", "owned_deferred", "customer_signed"].contains(kind) else { return .invalid }
+        guard !deletionPending else { return .ignored }
         if kind == "clipboard" {
             guard consent.allowsTracking else { return .consentRequired }
         } else {
             guard consent.allowsMeasurement else { return .consentRequired }
         }
+        guard await configuration.storage.consumeExactTokenIfNew(token) else { return .ignored }
         exactToken = ExactTokenReference(token: token, kind: kind, clipboardOptIn: kind == "clipboard" ? true : nil)
         await submitIdentify()
         var consumedTokenURL = URLComponents()
@@ -279,7 +310,7 @@ actor CoreRuntime {
             return value
         }
         pendingUserID = sanitized
-        guard consent.allowsMeasurement else { return }
+        guard consent.allowsMeasurement, !deletionPending else { return }
         await configuration.storage.setUserID(sanitized)
     }
 
@@ -293,31 +324,57 @@ actor CoreRuntime {
     }
 
     func deleteData() async throws {
-        defer {
-            identity = nil
-            attributionCache = nil
-            exactToken = nil
-            funnelIdentity = FunnelIdentity()
-            bufferedBeforeStart.removeAll()
+        guard let apiKey else { throw AttriKitError.notStarted }
+        let tombstone: DeletionTombstone
+        if let pending = await configuration.storage.deletionTombstone() {
+            tombstone = pending
+        } else {
+            let currentIdentity: InstallationIdentity
+            if let identity {
+                currentIdentity = identity
+            } else {
+                currentIdentity = try await configuration.storage.initializeIdentities()
+            }
+            tombstone = DeletionTombstone(
+                installationID: currentIdentity.installationID,
+                installEpochID: currentIdentity.installEpochID
+            )
+            try await configuration.storage.storeDeletionTombstone(tombstone)
         }
+
+        deletionPending = true
         firstOpenTask?.cancel()
         pollTask?.cancel()
         queueTask?.cancel()
+        firstOpenTask = nil
+        pollTask = nil
+        queueTask = nil
+        attributionCache = nil
+        exactToken = nil
+        funnelIdentity = FunnelIdentity()
+        bufferedBeforeStart.removeAll()
+        resetSessionState()
+        await waitForNetworkQuiescence()
 
-        var responseStatus: Int?
-        if let apiKey, let identity {
-            let body = try attriKitJSONEncoder().encode([
-                "installation_id": identity.installationID.uuidString.lowercased(),
-                "install_epoch_id": identity.installEpochID.uuidString.lowercased(),
-            ])
-            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
-                .post(path: "v1/privacy/delete", body: body, idempotencyKey: identity.installEpochID.uuidString.lowercased())
-            responseStatus = try? await configuration.transport.send(request).statusCode
+        let body = try attriKitJSONEncoder().encode(tombstone)
+        let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+            .post(
+                path: "v1/privacy/delete",
+                body: body,
+                idempotencyKey: tombstone.installEpochID.uuidString.lowercased()
+            )
+        let response = try await configuration.transport.send(request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw AttriKitError.deletionFailed(response.statusCode)
         }
-        try await configuration.storage.deleteAll()
-        if let responseStatus, !(200..<300).contains(responseStatus) {
-            throw AttriKitError.deletionFailed(responseStatus)
-        }
+        try await configuration.storage.completeDeletion()
+
+        identity = nil
+        pendingUserID = nil
+        sessionID = UUID()
+        consent = .unknown
+        self.apiKey = nil
+        deletionPending = false
     }
 
     func shutdown() async {
@@ -331,6 +388,7 @@ actor CoreRuntime {
     }
 
     private func beginMeasurement() async {
+        guard !deletionPending else { return }
         do {
             identity = try await configuration.storage.initializeIdentities()
         } catch {
@@ -363,8 +421,16 @@ actor CoreRuntime {
                 await self.applicationDidBecomeActive()
             case .willResignActive:
                 await self.applicationWillResignActive()
+            case .willTerminate:
+                await self.applicationWillTerminate()
             }
         }
+    }
+
+    private func applicationWillTerminate() async {
+        if activeSession != nil { await applicationWillResignActive() }
+        guard canUseNetwork() else { return }
+        _ = await flushQueueOnce()
     }
 
     private func resetSessionState() {
@@ -395,7 +461,7 @@ actor CoreRuntime {
     }
 
     private func submitFirstOpen() async {
-        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return }
         // Platform evidence is best-effort and BOUNDED: AppTransaction.shared can hang on
         // simulators/sandboxes (it does not throw), and a slow StoreKit must never delay the
         // first-open envelope — click-to-install timing is the product's accuracy substrate.
@@ -427,8 +493,8 @@ actor CoreRuntime {
             let data = try attriKitJSONEncoder().encode(envelope)
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/first-open", body: data, idempotencyKey: identity.installEpochID.uuidString.lowercased())
-            let response = try await configuration.transport.send(request)
-            guard consent.allowsMeasurement else { return }
+            let response = try await sendMeasurementRequest(request)
+            guard consent.allowsMeasurement, !deletionPending else { return }
             switch response.statusCode {
             case 200:
                 let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
@@ -453,7 +519,7 @@ actor CoreRuntime {
     }
 
     private func submitIdentify() async {
-        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return }
         let deviceEvidence = configuration.deviceEvidence()
         guard !funnelIdentity.isEmpty || exactToken != nil
                 || deviceEvidence.idfa != nil || deviceEvidence.idfv != nil else { return }
@@ -472,7 +538,7 @@ actor CoreRuntime {
         guard let body = try? attriKitJSONEncoder().encode(envelope) else { return }
         let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
             .post(path: "v1/ingest/identify", body: body, idempotencyKey: UUID().uuidString.lowercased())
-        _ = try? await configuration.transport.send(request)
+        _ = try? await sendMeasurementRequest(request)
     }
 
     private func startPolling(after milliseconds: Int) {
@@ -491,12 +557,12 @@ actor CoreRuntime {
     }
 
     private func pollAttributionOnce() async {
-        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return }
         do {
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .get(path: "v1/attribution/\(identity.installEpochID.uuidString.lowercased())", etag: attributionETag)
-            let response = try await configuration.transport.send(request)
-            guard consent.allowsMeasurement else { return }
+            let response = try await sendMeasurementRequest(request)
+            guard consent.allowsMeasurement, !deletionPending else { return }
             if let etag = response.headers["etag"] { attributionETag = etag }
             switch response.statusCode {
             case 200:
@@ -534,20 +600,18 @@ actor CoreRuntime {
     private enum QueueFlushOutcome { case empty, sent, retry }
 
     private func flushQueueOnce() async -> QueueFlushOutcome {
-        guard consent.allowsMeasurement, let apiKey else { return .empty }
-        guard var events = try? await configuration.storage.queuedEvents(now: configuration.now()), !events.isEmpty else { return .empty }
-        let sentAt = configuration.now()
-        for index in events.indices { events[index].sentAt = sentAt }
-        let batchID = UUID().uuidString.lowercased()
+        guard consent.allowsMeasurement, !deletionPending, let apiKey else { return .empty }
         do {
-            let data = try attriKitJSONEncoder().encode(EventBatch(batchID: batchID, events: events))
+            guard let batch = try await configuration.storage.nextEventBatch(now: configuration.now()) else {
+                return .empty
+            }
+            let data = try attriKitJSONEncoder().encode(EventBatch(batchID: batch.batchID, events: batch.events))
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
-                .post(path: "v1/ingest/events:batch", body: data, idempotencyKey: batchID)
-            let response = try await configuration.transport.send(request)
-            guard consent.allowsMeasurement else { return .empty }
-            let permanentRejections: Set<Int> = [400, 404, 409, 413, 422]
-            if (200..<300).contains(response.statusCode) || permanentRejections.contains(response.statusCode) {
-                try await configuration.storage.removeEvents(ids: Set(events.map(\.eventID)))
+                .post(path: "v1/ingest/events:batch", body: data, idempotencyKey: batch.batchID)
+            let response = try await sendMeasurementRequest(request)
+            guard consent.allowsMeasurement, !deletionPending else { return .empty }
+            if (200..<300).contains(response.statusCode) || Self.isPermanentClientFailure(response.statusCode) {
+                try await configuration.storage.acknowledgeEventBatch(batchID: batch.batchID)
                 return .sent
             }
             return .retry
@@ -558,8 +622,33 @@ actor CoreRuntime {
 
     private func clearQueueTask() { queueTask = nil }
 
+    static func isPermanentClientFailure(_ statusCode: Int) -> Bool {
+        (400..<500).contains(statusCode) && ![401, 403, 408, 429].contains(statusCode)
+    }
+
+    private func sendMeasurementRequest(_ request: URLRequest) async throws -> HTTPResult {
+        guard !deletionPending else { throw CancellationError() }
+        activeNetworkRequestCount += 1
+        defer {
+            activeNetworkRequestCount -= 1
+            if activeNetworkRequestCount == 0 {
+                let waiters = networkQuiescenceWaiters
+                networkQuiescenceWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+        return try await configuration.transport.send(request)
+    }
+
+    private func waitForNetworkQuiescence() async {
+        guard activeNetworkRequestCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            networkQuiescenceWaiters.append(continuation)
+        }
+    }
+
     private func scheduleConsentReceipt(scope: String) {
-        guard consent.allowsMeasurement, let apiKey, let identity else { return }
+        guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return }
         Task {
             let payload = ConsentReceipt(
                 installationID: identity.installationID,
@@ -571,12 +660,12 @@ actor CoreRuntime {
             guard let body = try? attriKitJSONEncoder().encode(payload) else { return }
             let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/consent", body: body, idempotencyKey: UUID().uuidString.lowercased())
-            _ = try? await configuration.transport.send(request)
+            _ = try? await self.sendMeasurementRequest(request)
         }
     }
 
     private func scheduleFirstOpenRetry() async {
-        guard consent.allowsMeasurement else { return }
+        guard consent.allowsMeasurement, !deletionPending else { return }
         let current = await configuration.storage.retryState()
         let now = configuration.now()
         let attempt = (current?.attempt ?? 0) + 1
@@ -597,6 +686,7 @@ actor CoreRuntime {
     }
 
     private func startOrResumeFirstOpen() async {
+        guard !deletionPending else { return }
         firstOpenTask?.cancel()
         if let retry = await configuration.storage.retryState(), retry.nextAttemptAt > configuration.now() {
             let delay = retry.nextAttemptAt.timeIntervalSince(configuration.now())
@@ -633,7 +723,7 @@ actor CoreRuntime {
         }
     }
 
-    private func stopAndWipe() async {
+    private func stopAndWipe(finalizeRevocation: Bool) async {
         firstOpenTask?.cancel()
         pollTask?.cancel()
         queueTask?.cancel()
@@ -642,6 +732,8 @@ actor CoreRuntime {
         queueTask = nil
         attributionCache = nil
         identity = nil
+        sessionID = UUID()
+        bufferedBeforeStart.removeAll()
         exactToken = nil
         pendingUserID = nil
         funnelIdentity = FunnelIdentity()
@@ -649,9 +741,12 @@ actor CoreRuntime {
         try? await configuration.storage.wipeQueue()
         await configuration.storage.setUserID(nil)
         try? await configuration.storage.setRetryState(nil)
+        if finalizeRevocation {
+            _ = try? await configuration.storage.finishRevocationTransition()
+        }
     }
 
-    private func canUseNetwork() -> Bool { consent.allowsMeasurement }
+    private func canUseNetwork() -> Bool { consent.allowsMeasurement && !deletionPending }
     private func hasAttributionResult() -> Bool { attributionCache != nil }
 
     private func eventConsent() -> EventConsent {

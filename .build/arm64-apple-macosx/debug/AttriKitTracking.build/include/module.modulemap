@@ -1,0 +1,3 @@
+module AttriKitTracking {
+    header "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/include/AttriKitTracking-Swift.h"
+}

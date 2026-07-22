@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/primary.swiftdeps"
+  },
+  "/private/tmp/attrikit-ios-sync/Tests/AttriKitLinkTokenTests/AttriKitLinkTokenTests.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.dia"
+  }
+}

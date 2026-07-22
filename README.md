@@ -105,9 +105,22 @@ payloads. If core measurement was already started, the resolved identifiers are
 forwarded in an identify payload instead. On macOS, ATT is unavailable and
 `requestConsent()` returns `.unknown`.
 
-The tracking privacy manifest deliberately declares no tracking domains. Apple blocks
-connections to declared tracking domains when ATT is denied; AttriKit instead enforces
-ATT at IDFA access so consent-safe ingest traffic continues without IDFA.
+The tracking module's privacy manifest has an empty `NSPrivacyTrackingDomains` array
+because the SDK cannot know the runtime `AttriKitEndpoint`. If the host sends IDFA to
+AttriKit, the **host app must declare the actual ingest domain in its own privacy
+manifest's `NSPrivacyTrackingDomains`**. As an alternative, a distribution that fixes the
+SDK to one ingest endpoint can declare that fixed domain in its customized module
+manifest. AttriKit still gates IDFA access on ATT authorization; the host declaration is
+an additional App Store privacy requirement, not a replacement for that runtime gate.
+
+## Revocation and deletion identity
+
+`AttriKit.setConsent(.revoked)` clears queued measurement data, rotates the install epoch,
+and resets the persisted session counter so later consent cannot relink activity across
+the revocation boundary. The stable `installation_id` remains only as the erasure anchor
+for `AttriKit.deleteData()`. A deletion request persists that installation/epoch pair as a
+retry tombstone, reports success only after the server confirms deletion, and then removes
+the remaining local anchor.
 
 ## What your app must declare
 

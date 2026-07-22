@@ -1,0 +1,1723 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.xctest/Contents/MacOS/AttriKitPackageTests",
+      "packagePath" : "/private/tmp/attrikit-ios-sync",
+      "productName" : "AttriKitPackageTests"
+    }
+  ],
+  "copyCommands" : {
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitCore.bundle/PrivacyInfo.xcprivacy" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Resources/PrivacyInfo.xcprivacy"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitCore.bundle/PrivacyInfo.xcprivacy"
+        }
+      ]
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitCoreTests.bundle/Fixtures" : {
+      "inputs" : [
+        {
+          "kind" : "directory",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/Fixtures"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "directory",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitCoreTests.bundle/Fixtures"
+        }
+      ]
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitLinkToken.bundle/PrivacyInfo.xcprivacy" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/Resources/PrivacyInfo.xcprivacy"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitLinkToken.bundle/PrivacyInfo.xcprivacy"
+        }
+      ]
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitTracking.bundle/PrivacyInfo.xcprivacy" : {
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitTracking/Resources/PrivacyInfo.xcprivacy"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKit_AttriKitTracking.bundle/PrivacyInfo.xcprivacy"
+        }
+      ]
+    }
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.AttriKitCore-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/AttriKit.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/CoreRuntime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Gzip.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/IdentityEvidence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PlatformEvidence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PublicTypes.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/SessionLifecycle.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Storage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Transport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<AttriKitCore-arm64-apple-macosx-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitCore",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/AttriKit.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/CoreRuntime.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Gzip.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/IdentityEvidence.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Models.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PlatformEvidence.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PublicTypes.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/SessionLifecycle.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Storage.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Transport.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/include/AttriKitCore-Swift.h",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/AttriKit.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/CoreRuntime.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Gzip.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/IdentityEvidence.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PlatformEvidence.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PublicTypes.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/SessionLifecycle.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Storage.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Transport.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/AttriKit.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/CoreRuntime.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Gzip.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/IdentityEvidence.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Models.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PlatformEvidence.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PublicTypes.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/SessionLifecycle.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Storage.swift",
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Transport.swift",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitCoreTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/AttriKitCoreTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/RuntimeHardeningTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/SessionTrackingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/TestSupport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<AttriKitCoreTests-arm64-apple-macosx-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitCoreTests",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCoreTests.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCoreTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/AttriKitCoreTests.swift",
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/RuntimeHardeningTests.swift",
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/SessionTrackingTests.swift",
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/TestSupport.swift",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitLinkToken-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/AttriKitLinkToken.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<AttriKitLinkToken-arm64-apple-macosx-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitLinkToken",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkToken.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/include/AttriKitLinkToken-Swift.h",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkToken.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/AttriKitLinkToken.swift",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitLinkTokenTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitLinkTokenTests/AttriKitLinkTokenTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkToken.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitLinkTokenTests",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkTokenTests.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkTokenTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitLinkTokenTests/AttriKitLinkTokenTests.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitPackageTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTrackingTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitLinkTokenTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCoreTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitPackageTests",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitPackageTests.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/include/AttriKitPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitTracking-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitTracking/AttriKitTracking.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<AttriKitTracking-arm64-apple-macosx-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitTracking",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTracking.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/AttriKitTracking.swift.o",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/include/AttriKitTracking-Swift.h",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/AttriKitTracking.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTracking.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Sources/AttriKitTracking/AttriKitTracking.swift",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.AttriKitTrackingTests-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/sources",
+      "importPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitTrackingTests/AttriKitTrackingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTracking.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "AttriKitTrackingTests",
+      "moduleOutputPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTrackingTests.swiftmodule",
+      "objects" : [
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/AttriKitTrackingTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j8",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-enable-experimental-feature",
+        "StrictConcurrency",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "attrikit_ios_sync"
+      ],
+      "outputFileMapPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/AttriKitTrackingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules/AttriKitTrackingTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/private/tmp/attrikit-ios-sync/Tests/AttriKitTrackingTests/AttriKitTrackingTests.swift"
+      ],
+      "tempsPath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "AttriKitCore" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitCore",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/AttriKit.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/CoreRuntime.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Gzip.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/IdentityEvidence.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Models.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PlatformEvidence.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PublicTypes.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/SessionLifecycle.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Storage.swift",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Transport.swift",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/include/AttriKitCore-Swift.h",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitCoreTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitCoreTests",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/AttriKitCoreTests.swift",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/RuntimeHardeningTests.swift",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/SessionTrackingTests.swift",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/TestSupport.swift",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitLinkToken" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitLinkToken",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/AttriKitLinkToken.swift",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/include/AttriKitLinkToken-Swift.h",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitLinkTokenTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitLinkTokenTests",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitLinkTokenTests/AttriKitLinkTokenTests.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitPackageTests",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/include/AttriKitPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitTracking" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitTracking",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Sources/AttriKitTracking/AttriKitTracking.swift",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/include/AttriKitTracking-Swift.h",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "AttriKitTrackingTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "AttriKitTrackingTests",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-c",
+      "/private/tmp/attrikit-ios-sync/Tests/AttriKitTrackingTests/AttriKitTrackingTests.swift",
+      "-I",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j8",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-enable-experimental-feature",
+      "StrictConcurrency",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "attrikit_ios_sync",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "AttriKitCore" : [
+
+    ],
+    "AttriKitCoreTests" : [
+      "AttriKitCore"
+    ],
+    "AttriKitLinkToken" : [
+      "AttriKitCore"
+    ],
+    "AttriKitLinkTokenTests" : [
+      "AttriKitLinkToken",
+      "AttriKitCore"
+    ],
+    "AttriKitPackageTests" : [
+      "AttriKitCoreTests",
+      "AttriKitLinkTokenTests",
+      "AttriKitLinkToken",
+      "AttriKitTrackingTests",
+      "AttriKitTracking",
+      "AttriKitCore"
+    ],
+    "AttriKitTracking" : [
+      "AttriKitCore"
+    ],
+    "AttriKitTrackingTests" : [
+      "AttriKitTracking",
+      "AttriKitCore"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/AttriKit.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/CoreRuntime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Gzip.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/IdentityEvidence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PlatformEvidence.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PublicTypes.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/SessionLifecycle.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Storage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Transport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/AttriKitCoreTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/RuntimeHardeningTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/SessionTrackingTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/TestSupport.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/AttriKitLinkToken.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitLinkTokenTests/AttriKitLinkTokenTests.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/AttriKit.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/CoreRuntime.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Gzip.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/IdentityEvidence.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PlatformEvidence.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/PublicTypes.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/SessionLifecycle.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Storage.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/Transport.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkTokenTests.build/AttriKitLinkTokenTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/AttriKitTracking.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/AttriKitTrackingTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitPackageTests.product/Objects.LinkFileList"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Sources/AttriKitTracking/AttriKitTracking.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTracking.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/private/tmp/attrikit-ios-sync/Tests/AttriKitTrackingTests/AttriKitTrackingTests.swift"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitTrackingTests.build/sources"
+    },
+    "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "": {
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/primary.swiftdeps"
+  },
+  "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/AttriKitCoreTests.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/AttriKitCoreTests.dia"
+  },
+  "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/RuntimeHardeningTests.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/RuntimeHardeningTests.dia"
+  },
+  "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/SessionTrackingTests.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/SessionTrackingTests.dia"
+  },
+  "/private/tmp/attrikit-ios-sync/Tests/AttriKitCoreTests/TestSupport.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/TestSupport.dia"
+  },
+  "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/DerivedSources/resource_bundle_accessor.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCoreTests.build/resource_bundle_accessor.dia"
+  }
+}

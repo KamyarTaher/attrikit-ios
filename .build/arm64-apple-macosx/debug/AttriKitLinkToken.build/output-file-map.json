@@ -1,0 +1,19 @@
+{
+  "": {
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/primary.swiftdeps"
+  },
+  "/private/tmp/attrikit-ios-sync/Sources/AttriKitLinkToken/AttriKitLinkToken.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/AttriKitLinkToken.dia"
+  },
+  "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/DerivedSources/resource_bundle_accessor.swift": {
+    "dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.d",
+    "object": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/resource_bundle_accessor.dia"
+  }
+}

@@ -83,8 +83,52 @@ struct RetryState: Codable, Sendable {
     var nextAttemptAt: Date
 }
 
+struct DeletionTombstone: Codable, Equatable, Sendable {
+    let installationID: UUID
+    let installEpochID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case installationID = "installation_id"
+        case installEpochID = "install_epoch_id"
+    }
+}
+
+struct StoredEventBatch: Sendable {
+    let batchID: String
+    let events: [EventEnvelope]
+}
+
+private struct PendingEventBatch: Codable {
+    let batchID: String
+    let eventIDs: [UUID]
+
+    enum CodingKeys: String, CodingKey {
+        case batchID = "batch_id"
+        case eventIDs = "event_ids"
+    }
+}
+
+private struct PendingRevocation: Codable {
+    let targetInstallEpochID: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case targetInstallEpochID = "target_install_epoch_id"
+    }
+}
+
 private struct QueueFile: Codable {
     var events: [EventEnvelope]
+    var pendingBatch: PendingEventBatch?
+
+    init(events: [EventEnvelope] = [], pendingBatch: PendingEventBatch? = nil) {
+        self.events = events
+        self.pendingBatch = pendingBatch
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case events
+        case pendingBatch = "pending_batch"
+    }
 }
 
 actor SDKStorage {
@@ -101,7 +145,7 @@ actor SDKStorage {
     private let maxEvents: Int
     private let maxBytes: Int
     private let maxAge: TimeInterval
-    private var inMemoryQueue: [EventEnvelope] = []
+    private var inMemoryQueue = QueueFile()
 
     private struct MigratingKey {
         let current: String
@@ -115,7 +159,12 @@ actor SDKStorage {
         static let userID = MigratingKey(current: "io.attrikit.user-id", legacy: "io.attrkit.user-id")
         static let fallbackInstallation = MigratingKey(current: "io.attrikit.fallback-installation-id", legacy: "io.attrkit.fallback-installation-id")
         static let sessionIndex = "io.attrikit.session-index"
+        static let deletionTombstone = "io.attrikit.deletion-tombstone"
+        static let consumedTokens = "io.attrikit.consumed-link-tokens"
+        static let pendingRevocation = "io.attrikit.pending-revocation"
     }
+
+    private static let maxConsumedTokens = 128
 
     init(
         defaults: Defaults = .standard,
@@ -202,6 +251,64 @@ actor SDKStorage {
         )
     }
 
+    func beginRevocationTransition() throws {
+        guard pendingRevocation() == nil else { return }
+        _ = try initializeIdentities()
+        let transition = PendingRevocation(targetInstallEpochID: UUID())
+        defaultsBox.value.set(
+            try attriKitJSONEncoder().encode(transition),
+            forKey: Key.pendingRevocation
+        )
+    }
+
+    @discardableResult
+    func finishRevocationTransition() throws -> InstallationIdentity {
+        let current = try initializeIdentities()
+        guard let transition = pendingRevocation() else {
+            storeConsent(.revoked)
+            return current
+        }
+        defaultsBox.value.set(
+            transition.targetInstallEpochID.uuidString.lowercased(),
+            forKey: Key.installEpoch.current
+        )
+        defaultsBox.value.removeObject(forKey: Key.installEpoch.legacy)
+        defaultsBox.value.removeObject(forKey: Key.sessionIndex)
+        storeConsent(.revoked)
+        defaultsBox.value.removeObject(forKey: Key.pendingRevocation)
+        return InstallationIdentity(
+            installationID: current.installationID,
+            installEpochID: transition.targetInstallEpochID,
+            localLineagePresent: current.localLineagePresent,
+            localEpochPresent: false
+        )
+    }
+
+    func recoverPendingRevocationIfNeeded() throws {
+        guard pendingRevocation() != nil else { return }
+        _ = try finishRevocationTransition()
+    }
+
+    func deletionTombstone() -> DeletionTombstone? {
+        guard let data = defaultsBox.value.data(forKey: Key.deletionTombstone) else { return nil }
+        return try? attriKitJSONDecoder().decode(DeletionTombstone.self, from: data)
+    }
+
+    func storeDeletionTombstone(_ tombstone: DeletionTombstone) throws {
+        defaultsBox.value.set(try attriKitJSONEncoder().encode(tombstone), forKey: Key.deletionTombstone)
+    }
+
+    func consumeExactTokenIfNew(_ token: String) -> Bool {
+        var tokens = defaultsBox.value.stringArray(forKey: Key.consumedTokens) ?? []
+        guard !tokens.contains(token) else { return false }
+        tokens.append(token)
+        if tokens.count > Self.maxConsumedTokens {
+            tokens.removeFirst(tokens.count - Self.maxConsumedTokens)
+        }
+        defaultsBox.value.set(tokens, forKey: Key.consumedTokens)
+        return true
+    }
+
     func setUserID(_ userID: String?) {
         if let userID {
             defaultsBox.value.set(userID, forKey: Key.userID.current)
@@ -233,41 +340,95 @@ actor SDKStorage {
 
     @discardableResult
     func enqueue(_ event: EventEnvelope, now: Date = Date()) throws -> Bool {
-        var events = (try? readQueue()) ?? []
-        events.removeAll { now.timeIntervalSince($0.occurredAt) > maxAge }
-        events.append(event)
+        var queue = (try? readQueue()) ?? QueueFile()
+        let pendingEventIDs = Set(queue.pendingBatch?.eventIDs ?? [])
+        queue.events.removeAll {
+            !pendingEventIDs.contains($0.eventID) && now.timeIntervalSince($0.occurredAt) > maxAge
+        }
+        queue.events.append(event)
 
-        while events.count > maxEvents || encodedSize(events) > maxBytes {
-            guard let removable = events.firstIndex(where: { !isProtected($0) }) else {
-                if event.eventID == events.last?.eventID {
-                    events.removeLast()
-                    try writeQueue(events)
+        while queue.events.count > maxEvents || encodedSize(queue.events) > maxBytes {
+            guard let removable = queue.events.firstIndex(where: {
+                !pendingEventIDs.contains($0.eventID) && !isProtected($0)
+            }) else {
+                if event.eventID == queue.events.last?.eventID {
+                    queue.events.removeLast()
+                    try writeQueue(queue)
                     throw StorageError.queueFullForProtectedEvent
                 }
                 break
             }
-            events.remove(at: removable)
+            queue.events.remove(at: removable)
         }
-        try writeQueue(events)
-        return events.contains { $0.eventID == event.eventID }
+        try writeQueue(queue)
+        return queue.events.contains { $0.eventID == event.eventID }
     }
 
     func queuedEvents(now: Date = Date()) throws -> [EventEnvelope] {
-        var events = (try? readQueue()) ?? []
-        let originalCount = events.count
-        events.removeAll { now.timeIntervalSince($0.occurredAt) > maxAge }
-        if events.count != originalCount { try writeQueue(events) }
-        return events
+        var queue = (try? readQueue()) ?? QueueFile()
+        let originalCount = queue.events.count
+        let pendingEventIDs = Set(queue.pendingBatch?.eventIDs ?? [])
+        queue.events.removeAll {
+            !pendingEventIDs.contains($0.eventID) && now.timeIntervalSince($0.occurredAt) > maxAge
+        }
+        if queue.events.count != originalCount { try writeQueue(queue) }
+        return queue.events
+    }
+
+    func nextEventBatch(now: Date = Date()) throws -> StoredEventBatch? {
+        var queue = try readQueue()
+        let pendingEventIDs = Set(queue.pendingBatch?.eventIDs ?? [])
+        queue.events.removeAll {
+            !pendingEventIDs.contains($0.eventID) && now.timeIntervalSince($0.occurredAt) > maxAge
+        }
+
+        if let pending = queue.pendingBatch {
+            let eventsByID = Dictionary(uniqueKeysWithValues: queue.events.map { ($0.eventID, $0) })
+            let events = pending.eventIDs.compactMap { eventsByID[$0] }
+            if events.count == pending.eventIDs.count {
+                try writeQueue(queue)
+                return StoredEventBatch(batchID: pending.batchID, events: events)
+            }
+            // A manually altered/corrupt queue cannot safely reuse an idempotency key
+            // for a different request body. Start a new batch for the surviving rows.
+            queue.pendingBatch = nil
+        }
+
+        guard !queue.events.isEmpty else {
+            try writeQueue(queue)
+            return nil
+        }
+        for index in queue.events.indices { queue.events[index].sentAt = now }
+        let pending = PendingEventBatch(
+            batchID: UUID().uuidString.lowercased(),
+            eventIDs: queue.events.map(\.eventID)
+        )
+        queue.pendingBatch = pending
+        try writeQueue(queue)
+        return StoredEventBatch(batchID: pending.batchID, events: queue.events)
+    }
+
+    func acknowledgeEventBatch(batchID: String) throws {
+        var queue = try readQueue()
+        guard let pending = queue.pendingBatch, pending.batchID == batchID else { return }
+        let acknowledgedIDs = Set(pending.eventIDs)
+        queue.events.removeAll { acknowledgedIDs.contains($0.eventID) }
+        queue.pendingBatch = nil
+        try writeQueue(queue)
     }
 
     func removeEvents(ids: Set<UUID>) throws {
-        let events = try readQueue().filter { !ids.contains($0.eventID) }
-        try writeQueue(events)
+        var queue = try readQueue()
+        queue.events.removeAll { ids.contains($0.eventID) }
+        if let pending = queue.pendingBatch, !ids.isDisjoint(with: pending.eventIDs) {
+            queue.pendingBatch = nil
+        }
+        try writeQueue(queue)
     }
 
     func wipeQueue() throws {
         guard let queueURL else {
-            inMemoryQueue.removeAll()
+            inMemoryQueue = QueueFile()
             return
         }
         let queueDirectory = queueURL.deletingLastPathComponent()
@@ -290,7 +451,19 @@ actor SDKStorage {
         removeValues(for: Key.retry)
         removeValues(for: Key.userID)
         defaultsBox.value.removeObject(forKey: Key.sessionIndex)
+        defaultsBox.value.removeObject(forKey: Key.consumedTokens)
+        defaultsBox.value.removeObject(forKey: Key.pendingRevocation)
         if let firstError { throw firstError }
+    }
+
+    func completeDeletion() throws {
+        try deleteAll()
+        defaultsBox.value.removeObject(forKey: Key.deletionTombstone)
+    }
+
+    private func pendingRevocation() -> PendingRevocation? {
+        guard let data = defaultsBox.value.data(forKey: Key.pendingRevocation) else { return nil }
+        return try? attriKitJSONDecoder().decode(PendingRevocation.self, from: data)
     }
 
     private func migratedString(for key: MigratingKey) -> String? {
@@ -320,23 +493,23 @@ actor SDKStorage {
         (try? attriKitJSONEncoder().encode(QueueFile(events: events)).count) ?? .max
     }
 
-    private func readQueue() throws -> [EventEnvelope] {
+    private func readQueue() throws -> QueueFile {
         guard let queueURL else { return inMemoryQueue }
-        guard FileManager.default.fileExists(atPath: queueURL.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: queueURL.path) else { return QueueFile() }
         let data = try Data(contentsOf: queueURL)
         do {
-            return try attriKitJSONDecoder().decode(QueueFile.self, from: data).events
+            return try attriKitJSONDecoder().decode(QueueFile.self, from: data)
         } catch {
             let timestamp = Int(Date().timeIntervalSince1970)
             let quarantineURL = queueURL.appendingPathExtension("corrupted-\(timestamp)")
             try? FileManager.default.moveItem(at: queueURL, to: quarantineURL)
-            return []
+            return QueueFile()
         }
     }
 
-    private func writeQueue(_ events: [EventEnvelope]) throws {
+    private func writeQueue(_ queue: QueueFile) throws {
         guard let queueURL else {
-            inMemoryQueue = events
+            inMemoryQueue = queue
             return
         }
         var directory = queueURL.deletingLastPathComponent()
@@ -344,7 +517,7 @@ actor SDKStorage {
         var resourceValues = URLResourceValues()
         resourceValues.isExcludedFromBackup = true
         try? directory.setResourceValues(resourceValues)
-        let data = try attriKitJSONEncoder().encode(QueueFile(events: events))
+        let data = try attriKitJSONEncoder().encode(queue)
         try data.write(to: queueURL, options: .atomic)
         #if os(iOS)
         try FileManager.default.setAttributes(

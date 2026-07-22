@@ -1,0 +1,3 @@
+module AttriKitLinkToken {
+    header "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitLinkToken.build/include/AttriKitLinkToken-Swift.h"
+}

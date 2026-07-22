@@ -5,14 +5,15 @@ import XCTest
 
 final class AttriKitLinkTokenTests: XCTestCase {
     private actor TokenAcceptanceSpy {
-        private var tokens: [String] = []
+        private var accepted: [(token: String, kind: String)] = []
 
-        func accept(_ token: String) -> DeepLinkResult {
-            tokens.append(token)
+        func accept(_ token: String, kind: String) -> DeepLinkResult {
+            accepted.append((token, kind))
             return .handled(URL(fileURLWithPath: "/accepted-token"))
         }
 
-        func acceptedTokens() -> [String] { tokens }
+        func acceptedTokens() -> [String] { accepted.map(\.token) }
+        func acceptedKinds() -> [String] { accepted.map(\.kind) }
     }
 
     func testCoreTypesWorkWithoutLinkTokenRuntimeInitialization() throws {
@@ -23,8 +24,8 @@ final class AttriKitLinkTokenTests: XCTestCase {
     func testConsumePasteboardIgnoresNonTokenWithoutTransmission() async {
         let spy = TokenAcceptanceSpy()
 
-        let result = await AttriKitLinkToken.consumePasteboardValue("password123456789") { token in
-            await spy.accept(token)
+        let result = await AttriKitLinkToken.consumePasteboardValue("password123456789") { token, kind in
+            await spy.accept(token, kind: kind)
         }
 
         XCTAssertEqual(result, .ignored)
@@ -36,13 +37,15 @@ final class AttriKitLinkTokenTests: XCTestCase {
         let spy = TokenAcceptanceSpy()
         let token = "ak1_" + String(repeating: "A", count: 43)
 
-        let result = await AttriKitLinkToken.consumePasteboardValue(token) { token in
-            await spy.accept(token)
+        let result = await AttriKitLinkToken.consumePasteboardValue(token) { token, kind in
+            await spy.accept(token, kind: kind)
         }
 
         XCTAssertEqual(result, .handled(URL(fileURLWithPath: "/accepted-token")))
         let acceptedTokens = await spy.acceptedTokens()
         XCTAssertEqual(acceptedTokens, [token])
+        let acceptedKinds = await spy.acceptedKinds()
+        XCTAssertEqual(acceptedKinds, ["clipboard"])
     }
 
     func testConsumePasteboardRejectsUnapprovedURLHostWithoutTransmission() async {
@@ -50,8 +53,8 @@ final class AttriKitLinkTokenTests: XCTestCase {
         let token = "ak1_" + String(repeating: "B", count: 43)
         let url = "https://example.com/install?attrkit_token=\(token)"
 
-        let result = await AttriKitLinkToken.consumePasteboardValue(url) { token in
-            await spy.accept(token)
+        let result = await AttriKitLinkToken.consumePasteboardValue(url) { token, kind in
+            await spy.accept(token, kind: kind)
         }
 
         XCTAssertEqual(result, .ignored)
@@ -64,13 +67,15 @@ final class AttriKitLinkTokenTests: XCTestCase {
         let token = "ak1_" + String(repeating: "_", count: 43)
         let url = "https://attrikit.io/install?attrkit_token=\(token)"
 
-        let result = await AttriKitLinkToken.consumePasteboardValue(url) { token in
-            await spy.accept(token)
+        let result = await AttriKitLinkToken.consumePasteboardValue(url) { token, kind in
+            await spy.accept(token, kind: kind)
         }
 
         XCTAssertEqual(result, .handled(URL(fileURLWithPath: "/accepted-token")))
         let acceptedTokens = await spy.acceptedTokens()
         XCTAssertEqual(acceptedTokens, [token])
+        let acceptedKinds = await spy.acceptedKinds()
+        XCTAssertEqual(acceptedKinds, ["clipboard"])
     }
 
     func testPrivacyManifestParsesWithoutTrackingDomains() throws {

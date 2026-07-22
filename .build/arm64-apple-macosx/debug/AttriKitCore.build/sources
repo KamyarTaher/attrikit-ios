@@ -1,0 +1,11 @@
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/AttriKit.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/CoreRuntime.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Gzip.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/IdentityEvidence.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Models.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PlatformEvidence.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/PublicTypes.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/SessionLifecycle.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Storage.swift
+/private/tmp/attrikit-ios-sync/Sources/AttriKitCore/Transport.swift
+/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/DerivedSources/resource_bundle_accessor.swift

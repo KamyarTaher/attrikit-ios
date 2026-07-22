@@ -17,6 +17,12 @@ import UIKit
 /// <key>NSUserTrackingUsageDescription</key>
 /// <string>We use your device identifier to measure advertising performance.</string>
 /// ```
+///
+/// Because the ingest endpoint is configured by the host at runtime, this module cannot
+/// name that endpoint in its own privacy manifest. A host that sends IDFA to AttriKit must
+/// add its actual ingest domain to `NSPrivacyTrackingDomains` in the host app's privacy
+/// manifest. Hosts that require a module-owned declaration can instead ship a fixed ingest
+/// endpoint and declare that fixed domain in a customized tracking-module manifest.
 public enum AttriKitTracking {
     private static let systems = TrackingSystemRegistry()
 
@@ -177,7 +183,7 @@ private struct AppleTrackingSystem: TrackingSystemProviding {
     #endif
 }
 
-private let zeroUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+private let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
 #if os(iOS)
 private func onMainThread<T: Sendable>(_ operation: @escaping @MainActor @Sendable () -> T) -> T {

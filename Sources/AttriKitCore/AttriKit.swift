@@ -8,6 +8,11 @@ public enum AttriKit {
         facade.enqueue { core in await core.start(apiKey: apiKey, consent: consent) }
     }
 
+    /// Updates the host's measurement/tracking consent state.
+    ///
+    /// Revocation clears queued measurement data, rotates the install epoch, and resets
+    /// the session sequence. The stable installation ID is retained only as the erasure
+    /// anchor required by `deleteData()`; a confirmed deletion removes that anchor too.
     public static func setConsent(_ consent: AttriKitConsent) {
         facade.enqueue { core in await core.setConsent(consent) }
     }

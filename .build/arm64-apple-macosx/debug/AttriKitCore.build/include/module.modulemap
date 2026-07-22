@@ -1,0 +1,3 @@
+module AttriKitCore {
+    header "/private/tmp/attrikit-ios-sync/.build/arm64-apple-macosx/debug/AttriKitCore.build/include/AttriKitCore-Swift.h"
+}

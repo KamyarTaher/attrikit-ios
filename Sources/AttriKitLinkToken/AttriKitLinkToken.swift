@@ -12,32 +12,33 @@ public enum AttriKitLinkToken {
     ]
 
     /// Reads the clipboard only in direct response to this host-app call and only after
-    /// `trackingGranted` consent has been supplied to AttriKitCore.
+    /// `trackingGranted` consent has been supplied to AttriKitCore. The call is the host's
+    /// explicit clipboard opt-in and is transmitted as `kind: "clipboard"`.
     public static func consumePasteboard() async -> DeepLinkResult {
         guard await AttriKit.canReadLinkTokenPasteboard() else { return .consentRequired }
         #if os(iOS)
         let value = await MainActor.run { UIPasteboard.general.string }
-        return await consumePasteboardValue(value) { token in
-            await AttriKit.acceptExplicitLinkToken(token, kind: "owned_deferred")
+        return await consumePasteboardValue(value) { token, kind in
+            await AttriKit.acceptExplicitLinkToken(token, kind: kind)
         }
         #else
         return .ignored
         #endif
     }
 
-    /// Accepts a token already obtained by the host without allowing this module to inspect
-    /// any other clipboard content.
+    /// Accepts a clipboard token already obtained by the host without allowing this module
+    /// to inspect any other clipboard content. Calling this API is explicit clipboard opt-in.
     public static func consume(_ token: String) async -> DeepLinkResult {
         guard await AttriKit.canReadLinkTokenPasteboard() else { return .consentRequired }
-        return await AttriKit.acceptExplicitLinkToken(token, kind: "owned_deferred")
+        return await AttriKit.acceptExplicitLinkToken(token, kind: "clipboard")
     }
 
     static func consumePasteboardValue(
         _ value: String?,
-        accepting acceptToken: @escaping @Sendable (String) async -> DeepLinkResult
+        accepting acceptToken: @escaping @Sendable (String, String) async -> DeepLinkResult
     ) async -> DeepLinkResult {
         guard let value, let token = token(fromPasteboardValue: value) else { return .ignored }
-        return await acceptToken(token)
+        return await acceptToken(token, "clipboard")
     }
 
     private static func token(fromPasteboardValue value: String) -> String? {
