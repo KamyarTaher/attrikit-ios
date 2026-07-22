@@ -39,10 +39,9 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 object: nil,
                 queue: .main
             ) { _ in
-                // The session-end envelope must reach durable SDK storage before the
-                // host notification callback returns. A detached task avoids inheriting
-                // the main actor while this callback waits for actor-backed persistence.
-                Self.deliverSynchronously(.willResignActive, to: handler)
+                MainActor.assumeIsolated {
+                    Self.deliverWithBackgroundTime(.willResignActive, to: handler)
+                }
             },
             center.addObserver(
                 forName: UIApplication.willTerminateNotification,
@@ -50,7 +49,7 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
-                    Self.deliverTermination(to: handler)
+                    Self.deliverWithBackgroundTime(.willTerminate, to: handler)
                 }
             },
         ]
@@ -85,36 +84,61 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         Task { await handler(event) }
     }
 
-    private static func deliverSynchronously(
+    @MainActor
+    private static func deliverWithBackgroundTime(
         _ event: ApplicationLifecycleEvent,
         to handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void
     ) {
-        let completed = DispatchSemaphore(value: 0)
-        Task.detached {
-            await handler(event)
-            completed.signal()
+        guard let application = sharedApplicationIfAvailable() else {
+            Task { await handler(event) }
+            return
         }
-        completed.wait()
+        let name: String
+        switch event {
+        case .willTerminate:
+            name = "io.attrikit.sdk.termination-flush"
+        case .willResignActive:
+            name = "io.attrikit.sdk.background-flush"
+        case .didBecomeActive:
+            name = "io.attrikit.sdk.lifecycle-flush"
+        }
+        let backgroundTask = BackgroundTaskLease.start(
+            application: application,
+            name: name
+        )
+        Task {
+            // The lifecycle handler does not finish until the session_end envelope has
+            // crossed the actor boundary and reached durable SDK storage. The UIKit
+            // notification itself stays nonblocking on the main thread.
+            await handler(event)
+            backgroundTask.end()
+        }
     }
 
     @MainActor
-    private static func deliverTermination(
-        to handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void
-    ) {
-        guard let application = sharedApplicationIfAvailable() else {
-            Task.detached { await handler(.willTerminate) }
-            return
+    private final class BackgroundTaskLease {
+        private let application: UIApplication
+        private var identifier: UIBackgroundTaskIdentifier = .invalid
+        private var ended = false
+
+        private init(application: UIApplication) {
+            self.application = application
         }
-        let backgroundTask = application.beginBackgroundTask(
-            withName: "io.attrikit.sdk.termination-flush",
-            expirationHandler: nil
-        )
-        Task.detached {
-            await handler(.willTerminate)
-            await MainActor.run {
-                guard backgroundTask != .invalid else { return }
-                application.endBackgroundTask(backgroundTask)
+
+        static func start(application: UIApplication, name: String) -> BackgroundTaskLease {
+            let lease = BackgroundTaskLease(application: application)
+            lease.identifier = application.beginBackgroundTask(withName: name) { [weak lease] in
+                Task { @MainActor in lease?.end() }
             }
+            return lease
+        }
+
+        func end() {
+            guard !ended else { return }
+            ended = true
+            guard identifier != .invalid else { return }
+            application.endBackgroundTask(identifier)
+            identifier = .invalid
         }
     }
 

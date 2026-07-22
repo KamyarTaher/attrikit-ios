@@ -6,6 +6,23 @@ import XCTest
 final class SessionTrackingTests: XCTestCase {
     private let apiKey = String(repeating: "k", count: 20)
 
+    func testLifecycleNotificationDeliveryIsNonblockingAndBackgroundTaskBounded() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/AttriKitCore/SessionLifecycle.swift")
+            .standardizedFileURL
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("DispatchSemaphore"))
+        XCTAssertFalse(source.contains(".wait()"))
+        XCTAssertTrue(source.contains("deliverWithBackgroundTime(.willResignActive"))
+        XCTAssertTrue(source.contains("deliverWithBackgroundTime(.willTerminate"))
+        XCTAssertTrue(source.contains("beginBackgroundTask(withName:"))
+        XCTAssertTrue(source.contains("Task { @MainActor in lease?.end() }"))
+        XCTAssertTrue(source.contains("application.endBackgroundTask(identifier)"))
+        XCTAssertTrue(source.contains("await handler(event)"))
+    }
+
     func testSessionEndUsesOrdinaryEventProtectionClass() throws {
         XCTAssertFalse(try AttriKitEvent("session_end").isProtectedRevenueEvent)
     }
