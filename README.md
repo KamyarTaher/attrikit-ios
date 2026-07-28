@@ -71,8 +71,9 @@ AttriKit.track(try AttriKitEvent("stencil_created", version: 1),
                properties: ["template": .string("sleeve")])
 ```
 
-Attach your own user id (opaque string, max 256 bytes, never an email address). This is
-the join key server-side webhooks use — with RevenueCat, pass the app user id:
+Attach your own user id (opaque string, max 256 bytes; strings containing @ are
+rejected, so emails are not accepted). This is the join key server-side webhooks
+use — with RevenueCat, pass the app user id:
 
 ```swift
 AttriKit.setUserID(Purchases.shared.appUserID)
@@ -86,19 +87,21 @@ let result = await AttriKit.attribution(timeout: .seconds(2))
 ```
 
 Campaign-link tokens (`ak1_…`) make attribution deterministic when they reach the SDK
-through a universal link or an explicit, consented pasteboard read:
+through a universal link or an explicit, consented pasteboard read. The public token
+APIs live in the AttriKitLinkToken module:
 
 ```swift
-_ = await AttriKit.handle(url)                       // universal links
-if await AttriKit.canReadLinkTokenPasteboard() {
-    _ = await AttriKitLinkToken.consumePasteboard()  // tracking consent required
-}
+_ = await AttriKit.handle(url)                        // universal links
+let result = await AttriKitLinkToken.consumePasteboard()
+// .consentRequired until consent is .trackingGranted; the call itself is the opt-in
 ```
 
-First-open delivery is idempotent on the server (retries and reinstalls never
-double-count) and retried on a bounded schedule: one initial attempt plus up to six
+First-open delivery is idempotent on the server (retries of the same install epoch
+never double-count; a reinstall is recorded as its own epoch and classified
+separately, never billed twice) and retried on a bounded schedule: one initial attempt plus up to six
 retries (5s → 30s → 5m → 1h → 3h → 6h, within ~24h of the first failure). Event batches
-flush about a second after enqueue with backoff up to one minute. The full wire
+flush immediately after enqueue, retrying with backoff starting at one second and
+capped at one minute. The full wire
 contract lives at https://attrikit.io/en/docs/ingest-api.
 
 ## Engagement signals

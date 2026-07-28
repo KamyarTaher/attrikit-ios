@@ -32,13 +32,23 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         // Extensions must remain a complete no-op even if UIKit is linked into the host.
         guard Bundle.main.bundleURL.pathExtension.lowercased() != "appex" else { return }
 
+        // Bump FIRST so every closure below binds to this install: a notification from
+        // an older subscription (mid-flight when it was replaced) fails the check.
+        let installGen = locked {
+            subscriptionGeneration &+= 1
+            return subscriptionGeneration
+        }
+
         let center = NotificationCenter.default
         let installed = [
             center.addObserver(
                 forName: UIApplication.didBecomeActiveNotification,
                 object: nil,
                 queue: .main
-            ) { _ in
+            ) { [weak self] _ in
+                // Skip delivery if stop()/re-start() invalidated this subscription while
+                // the notification was in flight — same guard as the synthesized path.
+                guard let self, self.isCurrentSubscription(installGen) else { return }
                 Self.deliverAsynchronously(.didBecomeActive, to: handler)
             },
             center.addObserver(
@@ -47,7 +57,8 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.bumpActivationGeneration()
+                    guard let self, self.isCurrentSubscription(installGen) else { return }
+                    self.bumpActivationGeneration()
                     Self.deliverWithBackgroundTime(.willResignActive, to: handler)
                 }
             },
@@ -57,7 +68,8 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.bumpActivationGeneration()
+                    guard let self, self.isCurrentSubscription(installGen) else { return }
+                    self.bumpActivationGeneration()
                     Self.deliverWithBackgroundTime(.willTerminate, to: handler)
                 }
             },
@@ -66,7 +78,6 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         let previous = locked {
             let previous = tokens
             tokens = installed
-            subscriptionGeneration &+= 1
             return previous
         }
         for token in previous { center.removeObserver(token) }
@@ -80,16 +91,15 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         // The subscription generation additionally drops the delivery if stop() or a
         // re-start() replaced the handler while the task was pending. The runtime's
         // activeSession == nil guard keeps a later OS duplicate benign.
-        let capturedSubscription = currentSubscriptionGeneration()
         Task { @MainActor in
             guard sharedApplicationIfAvailable()?.applicationState == .active,
-                  currentSubscriptionGeneration() == capturedSubscription else { return }
+                  isCurrentSubscription(installGen) else { return }
             let captured = currentActivationGeneration()
             Task {
                 let stillCurrent = await MainActor.run {
                     sharedApplicationIfAvailable()?.applicationState == .active
                         && currentActivationGeneration() == captured
-                        && currentSubscriptionGeneration() == capturedSubscription
+                        && isCurrentSubscription(installGen)
                 }
                 guard stillCurrent else { return }
                 await handler(.didBecomeActive)
@@ -109,8 +119,8 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         locked { activationGeneration }
     }
 
-    private func currentSubscriptionGeneration() -> Int {
-        locked { subscriptionGeneration }
+    private func isCurrentSubscription(_ installGen: Int) -> Bool {
+        locked { subscriptionGeneration == installGen && !tokens.isEmpty }
     }
 
     func stop() {
