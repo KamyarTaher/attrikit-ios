@@ -24,12 +24,18 @@ dependencies: [
 
 ## Core setup
 
-Configure the HTTPS ingest endpoint in the host app's Info.plist:
+Configure the HTTPS ingest endpoint in the host app's Info.plist. The value is
+`https://attrikit.io` for every workspace — one shared ingest host, and your publishable
+key (`pk_…`) routes each event to your app:
 
 ```xml
 <key>AttriKitEndpoint</key>
-<string>https://your-attrikit-ingest.example</string>
+<string>https://attrikit.io</string>
 ```
+
+In DEBUG builds you may point at `http://127.0.0.1:port` for a local capture stack. A
+missing or invalid key traps in DEBUG and disables attribution — it never silently
+targets another host.
 
 Then start measurement after obtaining the app's measurement consent:
 
@@ -54,6 +60,46 @@ AttriKit.setFunnelIdentity(
 Phone numbers must include a country calling code (a leading `+` or `00` is accepted).
 The hashes are included in the first first-open payload when set before startup and in a
 later identify payload when set after startup.
+
+## Custom events, user identity and attribution results
+
+Event names must match `^[a-z][a-z0-9_.-]{0,127}$` (the constructor throws otherwise)
+and are versioned with an integer:
+
+```swift
+AttriKit.track(try AttriKitEvent("stencil_created", version: 1),
+               properties: ["template": .string("sleeve")])
+```
+
+Attach your own user id (opaque string, max 256 bytes, never an email address). This is
+the join key server-side webhooks use — with RevenueCat, pass the app user id:
+
+```swift
+AttriKit.setUserID(Purchases.shared.appUserID)
+```
+
+Read how the install was attributed (method, network, campaign, finality) to
+personalize onboarding or paywall placements:
+
+```swift
+let result = await AttriKit.attribution(timeout: .seconds(2))
+```
+
+Campaign-link tokens (`ak1_…`) make attribution deterministic when they reach the SDK
+through a universal link or an explicit, consented pasteboard read:
+
+```swift
+_ = await AttriKit.handle(url)                       // universal links
+if await AttriKit.canReadLinkTokenPasteboard() {
+    _ = await AttriKitLinkToken.consumePasteboard()  // tracking consent required
+}
+```
+
+First-open delivery is idempotent on the server (retries and reinstalls never
+double-count) and retried on a bounded schedule: one initial attempt plus up to six
+retries (5s → 30s → 5m → 1h → 3h → 6h, within ~24h of the first failure). Event batches
+flush about a second after enqueue with backoff up to one minute. The full wire
+contract lives at https://attrikit.io/en/docs/ingest-api.
 
 ## Engagement signals
 
