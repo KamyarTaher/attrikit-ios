@@ -57,6 +57,77 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual((properties["session_index"] as? NSNumber)?.intValue, 1)
     }
 
+    /// Regression for the cold-launch race from the InkLine field review (2026-07-28):
+    /// a foreground notification landing before identity resolves from storage must not
+    /// lose the install's first session. Two independent guards pin it: beginMeasurement
+    /// re-fires didBecomeActive once identity arrives, and the observer synthesizes the
+    /// active state at subscription time when the OS notification raced ahead of it.
+    func testColdLaunchSessionRecoveryIsPinnedInSource() throws {
+        let runtimeURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/AttriKitCore/CoreRuntime.swift")
+            .standardizedFileURL
+        let runtime = try String(contentsOf: runtimeURL, encoding: .utf8)
+        XCTAssertTrue(runtime.contains("if applicationIsActive { await applicationDidBecomeActive() }"),
+                      "cold-launch recovery re-fire must exist in beginMeasurement")
+
+        let observerURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../Sources/AttriKitCore/SessionLifecycle.swift")
+            .standardizedFileURL
+        let observer = try String(contentsOf: observerURL, encoding: .utf8)
+        XCTAssertTrue(observer.contains("applicationState == .active"),
+                      "observer must synthesize didBecomeActive when subscribing while already active")
+    }
+
+    func testDidBecomeActiveBeforeIdentityResolutionStillStartsSession() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = sessionTransport()
+        await AttriKit.configureForTesting(makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+
+        AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
+        // Actor barrier: subscription is live; identity may still be resolving.
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        clock.advance(by: 2.5)
+        await lifecycle.send(.willResignActive)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the install's first session must not be lost on a cold launch")
+    }
+
+    func testDuplicateActiveDeliveriesProduceExactlyOneSession() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = sessionTransport()
+        await AttriKit.configureForTesting(makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+
+        AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
+        _ = await AttriKit.attribution(timeout: .zero)
+        // Synthesized + OS duplicate deliveries of the same activation must not
+        // start two sessions (the runtime's activeSession == nil guard).
+        await lifecycle.send(.didBecomeActive)
+        await lifecycle.send(.didBecomeActive)
+        clock.advance(by: 1.0)
+        await lifecycle.send(.willResignActive)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered)
+        let events = await sessionEvents(in: transport)
+        XCTAssertEqual(events.count, 1, "duplicate activations must yield exactly one session_end")
+        let properties = try XCTUnwrap(events.first?["properties"] as? [String: Any])
+        XCTAssertEqual((properties["session_index"] as? NSNumber)?.intValue, 1)
+    }
+
     func testThirtySecondGapStartsNextInstallScopedSession() async throws {
         let clock = TestDateClock()
         let lifecycle = ManualLifecycleObserver()

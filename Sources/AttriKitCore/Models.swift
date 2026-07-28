@@ -113,6 +113,7 @@ struct IdentifyEnvelope: Codable, Sendable {
     @LowercaseUUID var installationID: UUID
     @LowercaseUUID var installEpochID: UUID
     let occurredAt: Date
+    let customerUserID: String?
     let emailHash: String?
     let phoneHash: String?
     let exactTokenReference: ExactTokenReference?
@@ -124,6 +125,7 @@ struct IdentifyEnvelope: Codable, Sendable {
         case installationID = "installation_id"
         case installEpochID = "install_epoch_id"
         case occurredAt = "occurred_at"
+        case customerUserID = "customer_user_id"
         case emailHash = "email_hash"
         case phoneHash = "phone_hash"
         case exactTokenReference = "exact_token_ref"

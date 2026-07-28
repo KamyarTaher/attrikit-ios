@@ -2,6 +2,9 @@ import Foundation
 #if os(iOS)
 import BackgroundTasks
 #endif
+#if canImport(os)
+import os
+#endif
 
 private final class EvidenceResultRace: @unchecked Sendable {
     private let lock = NSLock()
@@ -71,6 +74,20 @@ struct AttriKitTestingConfiguration: Sendable {
         if let raw = Bundle.main.object(forInfoDictionaryKey: "AttriKitEndpoint") as? String,
            let url = URL(string: raw), url.scheme == "https" {
             return url
+        }
+        // No valid endpoint: attribution is impossible for this process. Fail loudly so the
+        // misconfiguration surfaces instead of silently sending to a reserved .invalid host.
+        #if canImport(os)
+        os_log(
+            .fault,
+            "AttriKit: missing or invalid Info.plist 'AttriKitEndpoint' (must be an https URL); attribution is DISABLED for this build."
+        )
+        #endif
+        // Trap in a host app's DEBUG build so a forgotten AttriKitEndpoint is caught before
+        // shipping. Skipped under XCTest: the shared facade eagerly builds `.live` without a
+        // host Info.plist, and every unit test overrides the runtime via configureForTesting.
+        if NSClassFromString("XCTest") == nil {
+            assertionFailure("AttriKit: missing or invalid Info.plist 'AttriKitEndpoint' (must be an https URL); attribution is disabled.")
         }
         return URL(string: "https://attrikit-endpoint-not-configured.invalid")
             ?? URL(fileURLWithPath: "/attrikit-endpoint-not-configured")
@@ -312,6 +329,7 @@ actor CoreRuntime {
         pendingUserID = sanitized
         guard consent.allowsMeasurement, !deletionPending else { return }
         await configuration.storage.setUserID(sanitized)
+        await submitIdentify()
     }
 
     func setFunnelIdentity(_ identity: FunnelIdentity) async {
@@ -500,13 +518,16 @@ actor CoreRuntime {
                 let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
                 attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
                 try? await configuration.storage.setRetryState(nil)
+                if pendingUserID != nil { await submitIdentify() }
             case 202:
                 let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
                 startPolling(after: decoded.retryAfterMilliseconds ?? 500)
                 try? await configuration.storage.setRetryState(nil)
+                if pendingUserID != nil { await submitIdentify() }
             case 204:
                 startPolling(after: 0)
                 try? await configuration.storage.setRetryState(nil)
+                if pendingUserID != nil { await submitIdentify() }
             case 400..<500 where response.statusCode != 429:
                 attributionCache = .failed
                 try? await configuration.storage.setRetryState(nil)
@@ -521,12 +542,13 @@ actor CoreRuntime {
     private func submitIdentify() async {
         guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return }
         let deviceEvidence = configuration.deviceEvidence()
-        guard !funnelIdentity.isEmpty || exactToken != nil
+        guard pendingUserID != nil || !funnelIdentity.isEmpty || exactToken != nil
                 || deviceEvidence.idfa != nil || deviceEvidence.idfv != nil else { return }
         let envelope = IdentifyEnvelope(
             installationID: identity.installationID,
             installEpochID: identity.installEpochID,
             occurredAt: configuration.now(),
+            customerUserID: pendingUserID,
             emailHash: funnelIdentity.emailHash,
             phoneHash: funnelIdentity.phoneHash,
             exactTokenReference: exactToken,
@@ -610,9 +632,21 @@ actor CoreRuntime {
                 .post(path: "v1/ingest/events:batch", body: data, idempotencyKey: batch.batchID)
             let response = try await sendMeasurementRequest(request)
             guard consent.allowsMeasurement, !deletionPending else { return .empty }
-            if (200..<300).contains(response.statusCode) || Self.isPermanentClientFailure(response.statusCode) {
+            if (200..<300).contains(response.statusCode) {
                 try await configuration.storage.acknowledgeEventBatch(batchID: batch.batchID)
                 return .sent
+            }
+            if Self.isPermanentClientFailure(response.statusCode) {
+                if batch.events.count <= 1 {
+                    // Genuine single poison/oversized event: ack it so the queue can drain.
+                    try await configuration.storage.acknowledgeEventBatch(batchID: batch.batchID)
+                    return .sent
+                }
+                // A permanent 4xx (413/422 etc.) on a multi-event batch must not delete the
+                // valid siblings alongside the offending event. Bisect and retry so the bad
+                // event is isolated to a single-event batch before it is ever dropped.
+                try await configuration.storage.splitPendingBatch(batchID: batch.batchID)
+                return .retry
             }
             return .retry
         } catch {

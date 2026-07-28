@@ -398,14 +398,19 @@ actor SDKStorage {
             try writeQueue(queue)
             return nil
         }
-        for index in queue.events.indices { queue.events[index].sentAt = now }
+        // Cap the batch at a client ceiling safely below the server's 64KB limit so a
+        // normal batch never trips a 413. At least one event is always sent (a lone
+        // oversized event is genuine poison the flush path isolates and drops).
+        let batchCount = Self.batchPrefixCount(within: queue.events)
+        for index in queue.events.prefix(batchCount).indices { queue.events[index].sentAt = now }
+        let batchEvents = Array(queue.events.prefix(batchCount))
         let pending = PendingEventBatch(
             batchID: UUID().uuidString.lowercased(),
-            eventIDs: queue.events.map(\.eventID)
+            eventIDs: batchEvents.map(\.eventID)
         )
         queue.pendingBatch = pending
         try writeQueue(queue)
-        return StoredEventBatch(batchID: pending.batchID, events: queue.events)
+        return StoredEventBatch(batchID: pending.batchID, events: batchEvents)
     }
 
     func acknowledgeEventBatch(batchID: String) throws {
@@ -414,6 +419,22 @@ actor SDKStorage {
         let acknowledgedIDs = Set(pending.eventIDs)
         queue.events.removeAll { acknowledgedIDs.contains($0.eventID) }
         queue.pendingBatch = nil
+        try writeQueue(queue)
+    }
+
+    /// Bisect the pending batch after a permanent client failure on a multi-event batch,
+    /// so the offending event is progressively isolated instead of dropping valid siblings.
+    /// Keeps the first half as a fresh pending batch (a NEW idempotency key, since the
+    /// request body changes) and returns the rest to the queue for later batches.
+    func splitPendingBatch(batchID: String) throws {
+        var queue = try readQueue()
+        guard let pending = queue.pendingBatch, pending.batchID == batchID else { return }
+        guard pending.eventIDs.count > 1 else { return }
+        let half = pending.eventIDs.count / 2
+        queue.pendingBatch = PendingEventBatch(
+            batchID: UUID().uuidString.lowercased(),
+            eventIDs: Array(pending.eventIDs.prefix(half))
+        )
         try writeQueue(queue)
     }
 
@@ -491,6 +512,27 @@ actor SDKStorage {
 
     private func encodedSize(_ events: [EventEnvelope]) -> Int {
         (try? attriKitJSONEncoder().encode(QueueFile(events: events)).count) ?? .max
+    }
+
+    /// Client-side batch byte ceiling, kept safely below the server's 64KB ingest limit
+    /// so a normal batch never round-trips into a 413.
+    private static let batchByteCeiling = 56 * 1024
+
+    /// Longest leading run of events whose encoded batch payload stays under the ceiling.
+    /// Always at least 1 so a single oversized event can still be attempted (and then
+    /// isolated + dropped by the flush path) rather than wedging the queue.
+    private static func batchPrefixCount(within events: [EventEnvelope]) -> Int {
+        guard !events.isEmpty else { return 0 }
+        var count = 1
+        while count < events.count,
+              encodedBatchSize(Array(events.prefix(count + 1))) <= batchByteCeiling {
+            count += 1
+        }
+        return count
+    }
+
+    private static func encodedBatchSize(_ events: [EventEnvelope]) -> Int {
+        (try? attriKitJSONEncoder().encode(EventBatch(batchID: "", events: events)).count) ?? .max
     }
 
     private func readQueue() throws -> QueueFile {

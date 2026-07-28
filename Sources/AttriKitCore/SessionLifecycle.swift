@@ -19,6 +19,9 @@ protocol ApplicationLifecycleObserving: Sendable {
 final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchecked Sendable {
     private let lock = NSLock()
     private var tokens: [NSObjectProtocol] = []
+    /// Bumped on every resign/terminate so a synthesized "active" captured before the
+    /// resign is dropped instead of starting a phantom background session.
+    private var activationGeneration = 0
 
     func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void) {
         #if canImport(UIKit) && os(iOS)
@@ -38,8 +41,9 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 forName: UIApplication.willResignActiveNotification,
                 object: nil,
                 queue: .main
-            ) { _ in
+            ) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.bumpActivationGeneration()
                     Self.deliverWithBackgroundTime(.willResignActive, to: handler)
                 }
             },
@@ -47,8 +51,9 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 forName: UIApplication.willTerminateNotification,
                 object: nil,
                 queue: .main
-            ) { _ in
+            ) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.bumpActivationGeneration()
                     Self.deliverWithBackgroundTime(.willTerminate, to: handler)
                 }
             },
@@ -60,9 +65,38 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
             return previous
         }
         for token in previous { center.removeObserver(token) }
+
+        // Cold-launch race: the OS can deliver didBecomeActive BEFORE this subscription
+        // exists (the SDK actor subscribes asynchronously after start()). A notification
+        // missed that way used to mean applicationIsActive stayed false and the install's
+        // first session was silently lost. Synthesize the active state at subscription
+        // time, gated on the activation generation: a resign/terminate between capture
+        // and delivery invalidates it, so no phantom session can start in the background.
+        // The runtime's activeSession == nil guard keeps a later OS duplicate benign.
+        Task { @MainActor in
+            guard sharedApplicationIfAvailable()?.applicationState == .active else { return }
+            let captured = currentActivationGeneration()
+            Task {
+                let stillCurrent = await MainActor.run {
+                    sharedApplicationIfAvailable()?.applicationState == .active
+                        && currentActivationGeneration() == captured
+                }
+                guard stillCurrent else { return }
+                await handler(.didBecomeActive)
+            }
+        }
         #else
         _ = handler
         #endif
+    }
+
+    @MainActor
+    private func bumpActivationGeneration() {
+        activationGeneration &+= 1
+    }
+
+    private func currentActivationGeneration() -> Int {
+        locked { activationGeneration }
     }
 
     func stop() {

@@ -438,6 +438,104 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertFalse(newestIsStillPresent)
     }
 
+    func testSplitPendingBatchBisectsWithFreshIdempotencyKeyAndDropsNothing() async throws {
+        let storage = makeStorage(label: "SplitPrimitive")
+        let identity = try await storage.initializeIdentities()
+        let events = (0..<4).map { makeEvent(name: "e\($0)", identity: identity) }
+        for event in events { try await storage.enqueue(event) }
+
+        let batchValue = try await storage.nextEventBatch()
+        let batch = try XCTUnwrap(batchValue)
+        XCTAssertEqual(batch.events.count, 4)
+
+        try await storage.splitPendingBatch(batchID: batch.batchID)
+        let halvedValue = try await storage.nextEventBatch()
+        let halved = try XCTUnwrap(halvedValue)
+        XCTAssertEqual(halved.events.count, 2, "batch must be bisected")
+        XCTAssertNotEqual(halved.batchID, batch.batchID, "changed body needs a fresh idempotency key")
+        let queuedCount = try await storage.queuedEvents().count
+        XCTAssertEqual(queuedCount, 4, "no event may be dropped by a split")
+
+        // Deliver the first half, then keep bisecting the rest down to the single poison.
+        try await storage.acknowledgeEventBatch(batchID: halved.batchID)
+        let restValue = try await storage.nextEventBatch()
+        let rest = try XCTUnwrap(restValue)
+        XCTAssertEqual(rest.events.count, 2)
+        try await storage.splitPendingBatch(batchID: rest.batchID)
+        let singleValue = try await storage.nextEventBatch()
+        let single = try XCTUnwrap(singleValue)
+        XCTAssertEqual(single.events.count, 1)
+        // Splitting a single-event batch is a no-op: genuine poison stays put to be dropped.
+        try await storage.splitPendingBatch(batchID: single.batchID)
+        let stillSingleValue = try await storage.nextEventBatch()
+        let stillSingle = try XCTUnwrap(stillSingleValue)
+        XCTAssertEqual(stillSingle.events.count, 1)
+    }
+
+    func testNextEventBatchCapsAccumulatedBytesBelowServerLimit() async throws {
+        let storage = makeStorage(label: "ByteCeiling")
+        let identity = try await storage.initializeIdentities()
+        let filler = String(repeating: "x", count: 900)
+        for index in 0..<80 {
+            try await storage.enqueue(makeEvent(name: "big_\(index)", identity: identity, properties: ["blob": .string(filler)]))
+        }
+        let total = try await storage.queuedEvents().count
+        XCTAssertEqual(total, 80)
+
+        let batchValue = try await storage.nextEventBatch()
+        let batch = try XCTUnwrap(batchValue)
+        XCTAssertLessThan(batch.events.count, total, "an oversized queue must not be sent as one batch")
+        let encoded = try attriKitJSONEncoder().encode(EventBatch(batchID: batch.batchID, events: batch.events))
+        XCTAssertLessThanOrEqual(encoded.count, 56 * 1024, "batch payload must stay under the client ceiling")
+    }
+
+    func testPermanentFailureOnMultiEventBatchBisectsAndDeliversAllSiblings() async throws {
+        let storage = makeStorage(label: "Bisect413")
+        // A 413 for any multi-event batch (an oversized/poison sibling), 2xx for a lone event.
+        let transport = StubTransport { request, _ in
+            guard request.url?.path.contains("events:batch") == true else { return successResult() }
+            let body = try gunzipStored(XCTUnwrap(request.httpBody))
+            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+            let count = (json?["events"] as? [[String: Any]])?.count ?? 0
+            if count > 1 { return successResult(status: 413, body: #"{"error":"payload_too_large"}"#) }
+            return successResult(body: #"{"status":"accepted","inserted":1,"duplicates":0}"#)
+        }
+        let identity = try await storage.initializeIdentities()
+        let first = makeEvent(name: "alpha", identity: identity)
+        let second = makeEvent(name: "beta", identity: identity)
+        try await storage.enqueue(first)
+        try await storage.enqueue(second)
+
+        let runtime = makeRuntime(storage: storage, transport: transport)
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        // Pre-fix acked the whole 2-event batch on the 413 and silently dropped both valid
+        // events. Post-fix bisects, retries, and drains only after every sibling is delivered.
+        let drained = await waitUntil(timeout: .seconds(5)) {
+            (try? await storage.queuedEvents().isEmpty) == true
+        }
+        XCTAssertTrue(drained)
+
+        let batches = await batchRequestEventIDs(in: transport)
+        XCTAssertTrue(batches.contains { $0.count > 1 }, "the oversized batch must have been attempted")
+        let deliveredAsSingle = Set(batches.filter { $0.count == 1 }.flatMap { $0 })
+        XCTAssertTrue(deliveredAsSingle.contains(first.eventID), "first sibling must survive and be delivered")
+        XCTAssertTrue(deliveredAsSingle.contains(second.eventID), "second sibling must survive and be delivered")
+        await runtime.shutdown()
+    }
+
+    private func batchRequestEventIDs(in transport: StubTransport) async -> [[UUID]] {
+        var result: [[UUID]] = []
+        for request in await eventBatchRequests(in: transport) {
+            guard let body = request.httpBody,
+                  let json = try? gunzipStored(body),
+                  let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+                  let events = obj["events"] as? [[String: Any]] else { continue }
+            result.append(events.compactMap { ($0["event_id"] as? String).flatMap(UUID.init(uuidString:)) })
+        }
+        return result
+    }
+
     private func makeRuntime(
         storage: SDKStorage,
         transport: HTTPTransport,
@@ -538,7 +636,11 @@ private enum RuntimeCleanupFailure: Error {
     case simulated
 }
 
-private func makeEvent(name: String, identity: InstallationIdentity) -> EventEnvelope {
+private func makeEvent(
+    name: String,
+    identity: InstallationIdentity,
+    properties: [String: AttriKitValue] = [:]
+) -> EventEnvelope {
     EventEnvelope(
         eventID: UUID(),
         eventName: name,
@@ -549,7 +651,7 @@ private func makeEvent(name: String, identity: InstallationIdentity) -> EventEnv
         installEpochID: identity.installEpochID,
         sessionID: UUID(),
         consent: EventConsent(measurement: "granted", tracking: "denied", policyVersion: 1),
-        properties: [:]
+        properties: properties
     )
 }
 

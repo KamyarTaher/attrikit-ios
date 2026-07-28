@@ -237,6 +237,37 @@ final class AttriKitCoreTests: XCTestCase {
         XCTAssertEqual(json["idfv"] as? String, idfv.uuidString.lowercased())
     }
 
+    func testPreStartUserIDSendsOpaqueRevenueCatJoinAfterFirstOpen() async throws {
+        let transport = StubTransport { request, _ in
+            if request.url?.path.hasSuffix("/v1/ingest/identify") == true {
+                return successResult(body: #"{"status":"accepted"}"#)
+            }
+            return successResult()
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.setUserID("customer-user-42")
+        AttriKit.start(
+            apiKey: String(repeating: "k", count: 20),
+            consent: .measurementGranted
+        )
+        _ = await AttriKit.attribution(timeout: .seconds(1))
+
+        let sent = await waitUntil {
+            await transport.requests().contains {
+                $0.url?.path.hasSuffix("/v1/ingest/identify") == true
+            }
+        }
+        XCTAssertTrue(sent)
+        let request = await transport.requests().last {
+            $0.url?.path.hasSuffix("/v1/ingest/identify") == true
+        }
+        let body = try gunzipStored(XCTUnwrap(request?.httpBody))
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(json["customer_user_id"] as? String, "customer-user-42")
+    }
+
     func testFirstOpenDoesNotAwaitSuspendedEvidencePastDeadline() async {
         let evidence = SuspendedEvidence()
         let transport = StubTransport { _, _ in successResult() }
