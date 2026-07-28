@@ -219,6 +219,11 @@ actor CoreRuntime {
     func applicationDidBecomeActive() async {
         applicationIsActive = true
         guard apiKey != nil, sessionTrackingEnabled, consent.allowsMeasurement, identity != nil else { return }
+        // A deleteData in flight must not let an interleaved activation create a session
+        // that outlives the wipe: identity/apiKey are still set until the roundtrip ends,
+        // and a session created here would stale-block every later start (activeSession
+        // == nil guard) for the process lifetime.
+        guard !deletionPending else { return }
         guard activeSession == nil else { return }
 
         let now = configuration.now()
@@ -239,7 +244,7 @@ actor CoreRuntime {
 
     func applicationWillResignActive() async {
         applicationIsActive = false
-        guard sessionTrackingEnabled, consent.allowsMeasurement,
+        guard sessionTrackingEnabled, consent.allowsMeasurement, !deletionPending,
               let identity, let activeSession else { return }
 
         let endedAt = configuration.now()
@@ -393,6 +398,10 @@ actor CoreRuntime {
         consent = .unknown
         self.apiKey = nil
         deletionPending = false
+        // Defense in depth: nothing session-shaped may survive the wipe, even if an
+        // activation interleaved with the roundtrip before the lifecycle guards learned
+        // about deletionPending.
+        resetSessionState()
     }
 
     func shutdown() async {

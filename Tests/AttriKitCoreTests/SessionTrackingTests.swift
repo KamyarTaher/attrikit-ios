@@ -128,6 +128,65 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual((properties["session_index"] as? NSNumber)?.intValue, 1)
     }
 
+    /// Regression for the deleteData session wedge found in the release-gate review:
+    /// a didBecomeActive interleaved with deleteData's network roundtrip used to leave a
+    /// stale activeSession behind, blocking fresh sessions and later emitting a bogus
+    /// session_end spanning the deletion window. The lifecycle guards now skip delivery
+    /// while deletionPending, and deleteData clears session state after the wipe.
+    /// Discriminator: the emitted session's duration must not span the deletion.
+    func testDeleteDataDoesNotWedgeSessionTracking() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = StubTransport { request, _ in
+            if request.url?.path.contains("v1/privacy/delete") == true {
+                try? await Task.sleep(for: .milliseconds(300))
+                return successResult()
+            }
+            if request.url?.path.contains("events:batch") == true {
+                return successResult(body: #"{"status":"accepted","inserted":1,"duplicates":0}"#)
+            }
+            return successResult()
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+
+        AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+
+        // Delete while the app is active; the activation arriving mid-roundtrip must not
+        // leave a stale session behind.
+        let deletionTask = Task { () -> Error? in
+            do { try await AttriKit.deleteData(); return nil } catch { return error }
+        }
+        try? await Task.sleep(for: .milliseconds(80))
+        await lifecycle.send(.didBecomeActive)
+        let deletionError = await deletionTask.value
+        XCTAssertNil(deletionError, "deleteData threw: \(String(describing: deletionError))")
+        let deleteRequests = await transport.requests().filter { $0.url?.path.contains("privacy/delete") == true }
+        XCTAssertEqual(deleteRequests.count, 1, "the deletion roundtrip must have fired")
+
+        // Any session the interleave wrongly created now spans the deletion: mark it.
+        clock.advance(by: 5.0)
+
+        // Sessions must work again after a fresh start, with a sane duration.
+        AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        clock.advance(by: 1.0)
+        await lifecycle.send(.willResignActive)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "session tracking must resume after deleteData")
+        let events = await sessionEvents(in: transport)
+        let properties = try XCTUnwrap(events.first?["properties"] as? [String: Any])
+        let durationMs = (properties["duration_ms"] as? NSNumber)?.intValue ?? -1
+        XCTAssertEqual(durationMs, 1_000, "the emitted session must start after the deletion, not span it (stale interleaved session)")
+    }
+
     func testThirtySecondGapStartsNextInstallScopedSession() async throws {
         let clock = TestDateClock()
         let lifecycle = ManualLifecycleObserver()
