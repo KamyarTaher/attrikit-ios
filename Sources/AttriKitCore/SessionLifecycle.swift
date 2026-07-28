@@ -22,6 +22,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
     /// Bumped on every resign/terminate so a synthesized "active" captured before the
     /// resign is dropped instead of starting a phantom background session.
     private var activationGeneration = 0
+    /// Bumped on every start()/stop() so a synthesized delivery scheduled under one
+    /// subscription can never invoke a stale handler after observation stops or
+    /// a new handler is installed.
+    private var subscriptionGeneration = 0
 
     func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void) {
         #if canImport(UIKit) && os(iOS)
@@ -62,6 +66,7 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         let previous = locked {
             let previous = tokens
             tokens = installed
+            subscriptionGeneration &+= 1
             return previous
         }
         for token in previous { center.removeObserver(token) }
@@ -72,14 +77,19 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         // first session was silently lost. Synthesize the active state at subscription
         // time, gated on the activation generation: a resign/terminate between capture
         // and delivery invalidates it, so no phantom session can start in the background.
-        // The runtime's activeSession == nil guard keeps a later OS duplicate benign.
+        // The subscription generation additionally drops the delivery if stop() or a
+        // re-start() replaced the handler while the task was pending. The runtime's
+        // activeSession == nil guard keeps a later OS duplicate benign.
+        let capturedSubscription = currentSubscriptionGeneration()
         Task { @MainActor in
-            guard sharedApplicationIfAvailable()?.applicationState == .active else { return }
+            guard sharedApplicationIfAvailable()?.applicationState == .active,
+                  currentSubscriptionGeneration() == capturedSubscription else { return }
             let captured = currentActivationGeneration()
             Task {
                 let stillCurrent = await MainActor.run {
                     sharedApplicationIfAvailable()?.applicationState == .active
                         && currentActivationGeneration() == captured
+                        && currentSubscriptionGeneration() == capturedSubscription
                 }
                 guard stillCurrent else { return }
                 await handler(.didBecomeActive)
@@ -99,11 +109,16 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         locked { activationGeneration }
     }
 
+    private func currentSubscriptionGeneration() -> Int {
+        locked { subscriptionGeneration }
+    }
+
     func stop() {
         #if canImport(UIKit) && os(iOS)
         let installed = locked {
             let installed = tokens
             tokens.removeAll()
+            subscriptionGeneration &+= 1
             return installed
         }
         for token in installed { NotificationCenter.default.removeObserver(token) }
