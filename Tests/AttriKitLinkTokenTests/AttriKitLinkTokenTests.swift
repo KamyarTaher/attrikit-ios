@@ -93,9 +93,15 @@ final class AttriKitLinkTokenTests: XCTestCase {
         // This module reads the pasteboard only when consent.allowsTracking is already true
         // (CoreRuntime.canReadLinkTokenPasteboard), and the token it recovers links an install to
         // a click that happened on another company's property. That is Apple's definition of
-        // tracking, so the manifest declares it and names the domain the host can act on.
+        // tracking, so the manifest declares it. The DOMAIN, however, stays out of it:
+        // MUST be empty. iOS blocks every request to a domain listed here when App Tracking
+        // Transparency is not authorized, and attrikit.io is the single ingest host for first-open,
+        // events, identify, consent receipts and /v1/privacy/delete — so naming it disables
+        // measurement and erasure for every user who declines the prompt. The host configures the
+        // endpoint at runtime and declares its own domain. Listing it here shipped in 2.2.0 and was
+        // reverted in 2.2.1; this assertion is what stops it coming back.
         XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
-        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], ["attrikit.io"])
+        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], [])
         let types = try XCTUnwrap(plist["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
         let other = try XCTUnwrap(types.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeOtherDataTypes" })
         // The link token itself is the value that crosses the property boundary.

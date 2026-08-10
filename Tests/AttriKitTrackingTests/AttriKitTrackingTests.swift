@@ -66,9 +66,13 @@ final class AttriKitTrackingTests: XCTestCase {
         let deviceID = try XCTUnwrap(rows.first)
 
         XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
-        // Apple expects the domains used for tracking to be listed whenever NSPrivacyTracking is
-        // true. An empty array here told the host app nothing it could act on.
-        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], ["attrikit.io"])
+        // MUST be empty. iOS blocks every request to a domain listed here when App Tracking
+        // Transparency is not authorized, and attrikit.io is the single ingest host for first-open,
+        // events, identify, consent receipts and /v1/privacy/delete — so naming it disables
+        // measurement and erasure for every user who declines the prompt. The host configures the
+        // endpoint at runtime and declares its own domain. Listing it here shipped in 2.2.0 and was
+        // reverted in 2.2.1; this assertion is what stops it coming back.
+        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], [])
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataType"] as? String, "NSPrivacyCollectedDataTypeDeviceID")
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataTypeTracking"] as? Bool, true)

@@ -5,6 +5,10 @@ deferred links, and optional App Tracking Transparency evidence.
 
 ## Installation
 
+Requires **iOS 16.0** or later (macOS 13.0 for host tooling). A target below that fails to resolve
+with `The package product 'AttriKitCore' requires minimum platform version 16.0 for the iOS
+platform`, which names the ceiling but not the fix, so it is stated here first.
+
 In Xcode, choose **File > Add Package Dependencies** and enter:
 
 ```text
