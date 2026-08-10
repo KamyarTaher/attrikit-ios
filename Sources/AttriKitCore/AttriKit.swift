@@ -1,6 +1,10 @@
 import Foundation
 
 public enum AttriKit {
+    /// Identifier used for the SDK's best-effort first-open background retry.
+    /// Host apps must list it under BGTaskSchedulerPermittedIdentifiers in Info.plist.
+    public static let backgroundRetryTaskIdentifier = "io.attrikit.sdk.retry"
+
     private static let facade = AttriKitFacade()
     private static let deviceEvidenceRegistry = DeviceEvidenceRegistry()
 

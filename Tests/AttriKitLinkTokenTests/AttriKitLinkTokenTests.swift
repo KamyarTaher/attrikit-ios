@@ -90,7 +90,18 @@ final class AttriKitLinkTokenTests: XCTestCase {
             PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
 
-        XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, false)
-        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], [])
+        // This module reads the pasteboard only when consent.allowsTracking is already true
+        // (CoreRuntime.canReadLinkTokenPasteboard), and the token it recovers links an install to
+        // a click that happened on another company's property. That is Apple's definition of
+        // tracking, so the manifest declares it and names the domain the host can act on.
+        XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
+        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], ["attrikit.io"])
+        let types = try XCTUnwrap(plist["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        let other = try XCTUnwrap(types.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeOtherDataTypes" })
+        // The link token itself is the value that crosses the property boundary.
+        XCTAssertEqual(other["NSPrivacyCollectedDataTypeTracking"] as? Bool, true)
+        let interaction = try XCTUnwrap(types.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeProductInteraction" })
+        // In-app interaction does not cross it, and must not be over-declared.
+        XCTAssertEqual(interaction["NSPrivacyCollectedDataTypeTracking"] as? Bool, false)
     }
 }

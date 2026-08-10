@@ -1,5 +1,8 @@
 @_spi(AttriKitTracking) import AttriKitCore
 import Foundation
+#if canImport(os)
+import os
+#endif
 
 #if os(iOS)
 import AdSupport
@@ -25,8 +28,12 @@ import UIKit
 /// endpoint and declare that fixed domain in a customized tracking-module manifest.
 public enum AttriKitTracking {
     private static let systems = TrackingSystemRegistry()
+    private static let applicationActivations = ApplicationActivationRegistry()
 
     /// Requests Apple's App Tracking Transparency authorization on iOS.
+    ///
+    /// If the application is not active, this call waits for activation and emits a diagnostic
+    /// before invoking Apple's prompt API.
     ///
     /// Returns `.unknown` on platforms without ATT, while authorization is not
     /// determined, or when the host omitted `NSUserTrackingUsageDescription`.
@@ -40,6 +47,16 @@ public enum AttriKitTracking {
             return .unknown
         }
         #endif
+        let applicationActivation = applicationActivations.current()
+        if !(await applicationActivation.isActive()) {
+            #if canImport(os)
+            os_log(
+                .info,
+                "AttriKit: ATT authorization is waiting for the host application to become active."
+            )
+            #endif
+            await applicationActivation.waitUntilActive()
+        }
         let consent = Self.consent(for: await systems.current().requestAuthorization())
         AttriKit.refreshTrackingEvidence()
         return consent
@@ -69,13 +86,18 @@ public enum AttriKitTracking {
         }
     }
 
-    static func configureForTesting(_ system: TrackingSystemProviding) {
+    static func configureForTesting(
+        _ system: TrackingSystemProviding,
+        applicationActivation: ApplicationActivationProviding = AlwaysActiveApplication()
+    ) {
         systems.install(system)
+        applicationActivations.install(applicationActivation)
         registerEvidenceProvider()
     }
 
     static func resetTestingConfiguration() {
         systems.install(AppleTrackingSystem())
+        applicationActivations.install(AppleApplicationActivation())
         registerEvidenceProvider()
     }
 
@@ -114,6 +136,11 @@ protocol TrackingSystemProviding: Sendable {
     func requestAuthorization() async -> TrackingAuthorizationStatus
 }
 
+protocol ApplicationActivationProviding: Sendable {
+    func isActive() async -> Bool
+    func waitUntilActive() async
+}
+
 private final class TrackingSystemRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var system: TrackingSystemProviding = AppleTrackingSystem()
@@ -128,6 +155,50 @@ private final class TrackingSystemRegistry: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return system
+    }
+}
+
+private final class ApplicationActivationRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var applicationActivation: ApplicationActivationProviding = AppleApplicationActivation()
+
+    func install(_ applicationActivation: ApplicationActivationProviding) {
+        lock.lock()
+        self.applicationActivation = applicationActivation
+        lock.unlock()
+    }
+
+    func current() -> ApplicationActivationProviding {
+        lock.lock()
+        defer { lock.unlock() }
+        return applicationActivation
+    }
+}
+
+struct AlwaysActiveApplication: ApplicationActivationProviding {
+    func isActive() async -> Bool { true }
+    func waitUntilActive() async {}
+}
+
+private struct AppleApplicationActivation: ApplicationActivationProviding {
+    func isActive() async -> Bool {
+        #if os(iOS)
+        return await MainActor.run { UIApplication.shared.applicationState == .active }
+        #else
+        return true
+        #endif
+    }
+
+    func waitUntilActive() async {
+        #if os(iOS)
+        let activations = NotificationCenter.default.notifications(
+            named: UIApplication.didBecomeActiveNotification
+        )
+        if await isActive() { return }
+        for await _ in activations {
+            if await isActive() { return }
+        }
+        #endif
     }
 }
 

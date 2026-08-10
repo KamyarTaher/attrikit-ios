@@ -74,11 +74,80 @@ final class SuspendedEvidence: PlatformEvidenceProviding, @unchecked Sendable {
     }
 }
 
+/// Evidence whose appTransactionJWS calls suspend one by one, releasable per call index.
+/// SuspendedEvidence releases every waiter at once, which cannot order a two-attempt race;
+/// this one can.
+final class GatedEvidence: PlatformEvidenceProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private var gates: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func appTransactionJWS() async -> String? {
+        let index = locked { () -> Int in
+            calls += 1
+            return calls
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            locked { gates[index] = continuation }
+        }
+        return nil
+    }
+
+    func adServicesToken() async -> String? { nil }
+    func coarseContext() -> CoarseContext {
+        CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
+    }
+    func appVersion() -> String { "1.2.3 (42)" }
+
+    func waitForCalls(_ expected: Int, timeout: Duration = .seconds(2)) async -> Bool {
+        await waitUntil(timeout: timeout) { [lock] in
+            lock.lock()
+            defer { lock.unlock() }
+            return self.calls >= expected
+        }
+    }
+
+    func release(_ index: Int) {
+        let continuation = locked { gates.removeValue(forKey: index) }
+        continuation?.resume()
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+/// The server side of first-open idempotency: first body for a key wins, a different body
+/// under the same key conflicts. The real check is sha256 over the whole envelope; comparing
+/// the decompressed bytes is the same equivalence.
+actor FirstOpenServer {
+    private var bodies: [String: Data] = [:]
+    private var recordedStatuses: [Int] = []
+
+    func register(idempotencyKey: String, body: Data) -> HTTPResult {
+        if let previous = bodies[idempotencyKey] {
+            if previous == body {
+                recordedStatuses.append(200)
+                return successResult()
+            }
+            recordedStatuses.append(409)
+            return HTTPResult(statusCode: 409, data: Data(), headers: [:])
+        }
+        bodies[idempotencyKey] = body
+        recordedStatuses.append(200)
+        return successResult()
+    }
+
+    func statuses() -> [Int] { recordedStatuses }
+}
+
 final class ManualLifecycleObserver: ApplicationLifecycleObserving, @unchecked Sendable {
     private let lock = NSLock()
-    private var handler: (@Sendable (ApplicationLifecycleEvent) async -> Void)?
+    private var handler: (@Sendable (ApplicationLifecycleEvent, Date?) async -> Void)?
 
-    func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent) async -> Void) {
+    func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void) {
         locked { self.handler = handler }
     }
 
@@ -88,7 +157,8 @@ final class ManualLifecycleObserver: ApplicationLifecycleObserving, @unchecked S
 
     func send(_ event: ApplicationLifecycleEvent) async {
         let callback = locked { handler }
-        await callback?(event)
+        // nil on purpose: these tests drive a TestDateClock, which stays authoritative.
+        await callback?(event, nil)
     }
 
     private func locked<T>(_ body: () -> T) -> T {

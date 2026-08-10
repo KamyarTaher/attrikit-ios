@@ -268,6 +268,235 @@ final class AttriKitCoreTests: XCTestCase {
         XCTAssertEqual(json["customer_user_id"] as? String, "customer-user-42")
     }
 
+    /// A relaunch must send the SAME first-open bytes as launch 1. The server hashes the whole
+    /// envelope, so rebuilding with `occurredAt: configuration.now()` on every launch made
+    /// launch 2 a 409 `idempotency_conflict` (handled as a registration, but needlessly); the
+    /// persisted body makes the relaunch the clean `duplicate` it always was. The control is
+    /// the clock: it advances one hour between launches, so a rebuild would betray itself in
+    /// `occurred_at` even if the byte comparison were fooled.
+    func testFirstOpenRelaunchResendsPersistedBodyByteForByte() async throws {
+        let suite = UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
+        let keychain = MemoryKeychain()
+        let clock = TestDateClock()
+        let transport = StubTransport { _, _ in successResult() }
+        let apiKey = String(repeating: "k", count: 20)
+
+        let first = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport, keychain: keychain, defaults: suite, directory: folder,
+            now: { clock.now() }
+        ))
+        await first.start(apiKey: apiKey, consent: .measurementGranted)
+        let sentFirst = await waitUntil {
+            await transport.requests().contains { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+        }
+        await first.shutdown()
+        XCTAssertTrue(sentFirst)
+        let firstRequests = await transport.requests()
+        let body1 = try gunzipStored(XCTUnwrap(
+            firstRequests.last { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }?.httpBody
+        ))
+
+        clock.advance(by: 3_600)
+
+        // Relaunch: a NEW runtime over the SAME storage. This is the shape the 360 audit's P0
+        // regression came from — relaunch producing a conflict instead of a duplicate.
+        let second = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport, keychain: keychain, defaults: suite, directory: folder,
+            now: { clock.now() }
+        ))
+        await second.start(apiKey: apiKey, consent: .measurementGranted)
+        let sentSecond = await waitUntil {
+            await transport.requests().filter { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }.count >= 2
+        }
+        await second.shutdown()
+        XCTAssertTrue(sentSecond)
+        let allRequests = await transport.requests()
+        let body2 = try gunzipStored(XCTUnwrap(
+            allRequests.last { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }?.httpBody
+        ))
+
+        XCTAssertEqual(body2, body1, "the relaunch rebuilt the envelope instead of resending the persisted body")
+        // Non-vacuity: the relaunched body carries launch 1's occurred_at, NOT the advanced
+        // clock's — without persistence it would carry the advanced one.
+        let json2 = try XCTUnwrap(JSONSerialization.jsonObject(with: body2) as? [String: Any])
+        let json1 = try XCTUnwrap(JSONSerialization.jsonObject(with: body1) as? [String: Any])
+        XCTAssertEqual(json2["occurred_at"] as? String, json1["occurred_at"] as? String)
+    }
+
+    /// A persisted first-open without IDFA is still consent-bound. Replaying its bytes after a
+    /// tracking downgrade would report tracking_granted and could replay other tracking evidence.
+    func testFirstOpenRelaunchEvictsBodyProducedUnderDifferentConsentWithoutIDFA() async throws {
+        let suite = UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
+        let keychain = MemoryKeychain()
+        let firstTransport = StubTransport { request, _ in
+            if request.url?.path.hasSuffix("/v1/ingest/first-open") == true {
+                return successResult(status: 503, body: #"{"error":"offline"}"#)
+            }
+            return successResult()
+        }
+        let firstStorage = SDKStorage(
+            defaults: .init(value: suite),
+            keychain: keychain,
+            directory: folder
+        )
+        let first = CoreRuntime(configuration: makeTestConfiguration(
+            transport: firstTransport,
+            keychain: keychain,
+            defaults: suite,
+            directory: folder,
+            deviceEvidence: DeviceEvidence(idfa: nil, idfv: nil)
+        ))
+
+        await first.start(apiKey: String(repeating: "k", count: 20), consent: .trackingGranted)
+        let firstSent = await waitUntil {
+            await firstTransport.requests().contains {
+                $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+            }
+        }
+        XCTAssertTrue(firstSent)
+        await first.shutdown()
+        try await firstStorage.setRetryState(nil)
+
+        let firstRequests = await firstTransport.requests()
+        let firstBody = try gunzipStored(XCTUnwrap(
+            firstRequests.last { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }?.httpBody
+        ))
+        let firstJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: firstBody) as? [String: Any])
+        XCTAssertNil(firstJSON["idfa"], "precondition: the stale body must not rely on the IDFA invalidation rule")
+
+        let secondTransport = StubTransport { _, _ in successResult() }
+        let second = CoreRuntime(configuration: makeTestConfiguration(
+            transport: secondTransport,
+            keychain: keychain,
+            defaults: suite,
+            directory: folder,
+            deviceEvidence: DeviceEvidence(idfa: nil, idfv: nil)
+        ))
+        await second.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let secondSent = await waitUntil {
+            await secondTransport.requests().contains {
+                $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+            }
+        }
+        XCTAssertTrue(secondSent)
+        await second.shutdown()
+
+        let secondRequests = await secondTransport.requests()
+        let secondBody = try gunzipStored(XCTUnwrap(
+            secondRequests.last { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }?.httpBody
+        ))
+        let secondJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: secondBody) as? [String: Any])
+        let consent = try XCTUnwrap(secondJSON["consent"] as? [String: Any])
+        XCTAssertEqual(
+            consent["state"] as? String,
+            AttriKitConsent.measurementGranted.rawValue,
+            "a relaunch replayed the consent state that the user had downgraded"
+        )
+        XCTAssertNotEqual(secondBody, firstBody, "a consent mismatch must evict the stored bytes")
+    }
+
+    /// A consent flip can leave TWO first-open attempts alive: cancellation is cooperative and
+    /// submitFirstOpen checks nothing. Measured without the re-read (adversarial review,
+    /// 5bd2620): A persists+ sends bodyA (200), B wakes later, persists bodyB over it, and every
+    /// relaunch resends bodyB — which the server has never seen — a 409 forever. The re-read
+    /// before persist collapses the race into the duplicate it should have been. This test
+    /// produces the exact race deterministically and emulates the server (sha256 of the body,
+    /// 409 on same idempotency key with a different hash).
+    func testFirstOpenConcurrentAttemptsCollapseToTheAcceptedBody() async throws {
+        let evidence = GatedEvidence()
+        let clock = TestDateClock()
+        let server = FirstOpenServer()
+        let transport = StubTransport { request, _ in
+            guard request.url?.path.hasSuffix("/v1/ingest/first-open") == true,
+                  let body = request.httpBody,
+                  let key = request.value(forHTTPHeaderField: "Idempotency-Key") else {
+                return successResult()
+            }
+            let decompressed = (try? gunzipStored(body)) ?? body
+            return await server.register(idempotencyKey: key, body: decompressed)
+        }
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport, evidence: evidence, now: { clock.now() }
+        ))
+        let apiKey = String(repeating: "k", count: 20)
+
+        // Attempt A suspends on its evidence wait.
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+        let aWaiting = await evidence.waitForCalls(1)
+        XCTAssertTrue(aWaiting)
+
+        // A consent flip re-enters beginMeasurement and spawns attempt B, which ALSO finds no
+        // persisted body yet and suspends. A is cancelled, but cancellation is cooperative and
+        // nothing in submitFirstOpen observes it.
+        await runtime.setConsent(.unknown)
+        await runtime.setConsent(.measurementGranted)
+        let bWaiting = await evidence.waitForCalls(2)
+        XCTAssertTrue(bWaiting)
+
+        // A wins: persists its body and sends it. The server has it now.
+        evidence.release(1)
+        let firstSent = await waitUntil {
+            await transport.requests().contains { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+        }
+        XCTAssertTrue(firstSent)
+
+        clock.advance(by: 3_600)
+
+        // B wakes an hour later. Without the re-read it builds at the new clock, persists bodyB
+        // over bodyA and 409s — and every relaunch would 409 forever. With it, B adopts the
+        // body the server accepted and the duplicate succeeds.
+        evidence.release(2)
+        let secondSent = await waitUntil {
+            await transport.requests().filter { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }.count >= 2
+        }
+        await runtime.shutdown()
+        XCTAssertTrue(secondSent)
+
+        let statuses = await server.statuses()
+        XCTAssertEqual(statuses, [200, 200],
+                       "the superseded attempt corrupted the accepted body instead of adopting it")
+        let allRequests = await transport.requests()
+        let bodies = allRequests
+            .filter { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+            .compactMap(\.httpBody)
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertEqual(bodies[0], bodies[1],
+                       "the two attempts sent different bytes for the same epoch — the relaunch would 409 forever")
+    }
+
+    /// The persisted body is scoped to its epoch: after a wipe (which rotates the epoch), the
+    /// next first-open must be freshly built — replaying the old epoch's body would submit
+    /// evidence for an install the server considers deleted.
+    func testFirstOpenBodyIsNotReplayedAcrossAnEpochRotation() async throws {
+        let suite = UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
+        let keychain = MemoryKeychain()
+        let storage = SDKStorage(defaults: .init(value: suite), keychain: keychain, directory: folder)
+
+        // Simulate a persisted body from a PREVIOUS epoch by hand: the storage layer is the
+        // contract being tested here, and a hand-seeded body with the wrong epoch must be
+        // discarded on read, never replayed.
+        let staleBody = Data(#"{"stale":true}"#.utf8)
+        try await storage.setFirstOpenBody(
+            staleBody,
+            installEpochID: UUID(),
+            consent: .measurementGranted
+        )
+        let replayed = await storage.firstOpenBody(
+            installEpochID: UUID(),
+            consent: .measurementGranted
+        )
+        XCTAssertNil(replayed, "a body persisted under a different epoch was returned for replay")
+        // And the read EVICTED it, so a later read cannot race into it.
+        let reread = await storage.firstOpenBody(
+            installEpochID: UUID(),
+            consent: .measurementGranted
+        )
+        XCTAssertNil(reread)
+    }
+
     func testFirstOpenDoesNotAwaitSuspendedEvidencePastDeadline() async {
         let evidence = SuspendedEvidence()
         let transport = StubTransport { _, _ in successResult() }
@@ -461,6 +690,55 @@ final class KeychainFallbackTests: XCTestCase {
 
         let second = try await storage.initializeIdentities()
         XCTAssertEqual(first.installationID, second.installationID, "fallback identity must be stable across launches")
+    }
+
+    // The two tests around this one only ever exercise a keychain that ALWAYS throws, which is why
+    // the real case survived: keychain works, then fails for one launch, then works. The fallback
+    // slot was written only in the failure path, so it was empty the first time it was needed and a
+    // brand-new UUID was minted. The launches either side reported one installation_id and the
+    // degraded launch reported another, which the server reads as a different install: split
+    // attribution, and a first-open that can be counted twice.
+    func testAKeychainOutageReusesTheInstallationIdInsteadOfMintingANewOne() async throws {
+        let suite = UserDefaults(suiteName: "attrkit-keychain-outage-\(UUID().uuidString)")!
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        // PRE-SEEDED, which is the case that isolates the fix: an app upgrading from a build whose
+        // keychain already held an identity but whose defaults had no fallback slot. A mutation
+        // proved this matters - with a fresh keychain the MINT path populates the fallback and the
+        // test passes even with the success-path mirror deleted, so it would have been testing
+        // nothing about this branch.
+        let healthy = MemoryKeychain()
+        let seeded = UUID()
+        try healthy.write(seeded)
+
+        // Launch 1: healthy, reads the pre-existing identity.
+        let first = SDKStorage(defaults: SDKStorage.Defaults(value: suite), keychain: healthy, directory: dir)
+        let original = try await first.initializeIdentities()
+        // A first-ever launch MINTS the id, so it correctly reports no lineage. Lineage is claimed
+        // only when an existing keychain value is found, which is the launch below.
+        XCTAssertEqual(original.installationID, seeded, "precondition: the stored identity is read")
+        XCTAssertTrue(original.localLineagePresent, "precondition: an existing keychain id is lineage")
+
+        // Launch 2: the keychain throws, as it does before the first unlock after a reboot.
+        let outage = SDKStorage(
+            defaults: SDKStorage.Defaults(value: suite),
+            keychain: ThrowingKeychain(),
+            directory: dir
+        )
+        let degraded = try await outage.initializeIdentities()
+        XCTAssertEqual(
+            degraded.installationID,
+            original.installationID,
+            "a keychain outage must not change the installation id the server already knows"
+        )
+        XCTAssertFalse(
+            degraded.localLineagePresent,
+            "control: the degraded launch must still report NO lineage, which is what keeps it honest"
+        )
+
+        // Launch 3: recovered, and the identity never moved.
+        let recovered = SDKStorage(defaults: SDKStorage.Defaults(value: suite), keychain: healthy, directory: dir)
+        let afterRecovery = try await recovered.initializeIdentities()
+        XCTAssertEqual(afterRecovery.installationID, original.installationID)
     }
 
     func testDeleteAllRemovesFallbackInstallationIdentity() async throws {

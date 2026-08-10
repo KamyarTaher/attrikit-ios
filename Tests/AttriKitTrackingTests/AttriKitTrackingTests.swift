@@ -28,6 +28,29 @@ final class AttriKitTrackingTests: XCTestCase {
         XCTAssertEqual(consent, .trackingGranted)
     }
 
+    func testRequestConsentWaitsUntilApplicationIsActiveBeforeRequestingATT() async {
+        let system = CountingTrackingSystem(status: .authorized)
+        let applicationActivation = ManualApplicationActivation(active: false)
+        AttriKitTracking.configureForTesting(
+            system,
+            applicationActivation: applicationActivation
+        )
+
+        let request = Task { await AttriKitTracking.requestConsent() }
+        let waiting = await waitUntil {
+            await applicationActivation.waiterCount() == 1
+        }
+        XCTAssertTrue(waiting, "the inactive request must wait for application activation")
+        let callsWhileInactive = system.requestCount
+        XCTAssertEqual(callsWhileInactive, 0, "ATT must not be requested while the application is inactive")
+
+        await applicationActivation.activate()
+        let consent = await request.value
+        XCTAssertEqual(consent, .trackingGranted)
+        let callsAfterActivation = system.requestCount
+        XCTAssertEqual(callsAfterActivation, 1)
+    }
+
     func testPrivacyManifestDeclaresTrackingDeviceIDWithoutDomains() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -43,7 +66,9 @@ final class AttriKitTrackingTests: XCTestCase {
         let deviceID = try XCTUnwrap(rows.first)
 
         XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
-        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], [])
+        // Apple expects the domains used for tracking to be listed whenever NSPrivacyTracking is
+        // true. An empty array here told the host app nothing it could act on.
+        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], ["attrikit.io"])
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataType"] as? String, "NSPrivacyCollectedDataTypeDeviceID")
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
         XCTAssertEqual(deviceID["NSPrivacyCollectedDataTypeTracking"] as? Bool, true)
@@ -93,4 +118,70 @@ private struct StubTrackingSystem: TrackingSystemProviding {
     var advertisingIdentifier: UUID? { idfa }
     var vendorIdentifier: UUID? { idfv }
     func requestAuthorization() async -> TrackingAuthorizationStatus { status }
+}
+
+private final class CountingTrackingSystem: TrackingSystemProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private let status: TrackingAuthorizationStatus
+    private var calls = 0
+
+    init(status: TrackingAuthorizationStatus) {
+        self.status = status
+    }
+
+    var authorizationStatus: TrackingAuthorizationStatus { status }
+    var advertisingIdentifier: UUID? { nil }
+    var vendorIdentifier: UUID? { nil }
+    var requestCount: Int { locked { calls } }
+
+    func requestAuthorization() async -> TrackingAuthorizationStatus {
+        locked { calls += 1 }
+        return status
+    }
+
+    private func locked<T>(_ operation: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
+}
+
+private actor ManualApplicationActivation: ApplicationActivationProviding {
+    private var active: Bool
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(active: Bool) {
+        self.active = active
+    }
+
+    func isActive() -> Bool { active }
+
+    func waitUntilActive() async {
+        if active { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func activate() {
+        active = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+
+    func waiterCount() -> Int { waiters.count }
+}
+
+private func waitUntil(
+    timeout: Duration = .seconds(2),
+    _ condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return await condition()
 }

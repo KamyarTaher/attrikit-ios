@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(os)
+import os
+#endif
 #if canImport(Security)
 import Security
 #endif
@@ -98,6 +101,36 @@ struct StoredEventBatch: Sendable {
     let events: [EventEnvelope]
 }
 
+struct StoredConsentReceipt: Codable, Equatable, Sendable {
+    let idempotencyKey: UUID
+    let installationID: UUID
+    let installEpochID: UUID
+    let scope: String
+    let state: AttriKitConsent
+    let occurredAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case idempotencyKey = "idempotency_key"
+        case installationID = "installation_id"
+        case installEpochID = "install_epoch_id"
+        case scope, state
+        case occurredAt = "occurred_at"
+    }
+
+    var kind: ConsentReceiptKind? {
+        switch state {
+        case .measurementGranted, .trackingGranted: .grant
+        case .denied, .revoked: .withdrawal
+        case .unknown: nil
+        }
+    }
+}
+
+enum ConsentReceiptKind: Sendable {
+    case grant
+    case withdrawal
+}
+
 private struct PendingEventBatch: Codable {
     let batchID: String
     let eventIDs: [UUID]
@@ -154,6 +187,7 @@ actor SDKStorage {
 
     private enum Key {
         static let consent = MigratingKey(current: "io.attrikit.consent", legacy: "io.attrkit.consent")
+        static let firstOpenBody = "io.attrikit.first-open-body"
         static let installEpoch = MigratingKey(current: "io.attrikit.install-epoch", legacy: "io.attrkit.install-epoch")
         static let retry = MigratingKey(current: "io.attrikit.first-open-retry", legacy: "io.attrkit.first-open-retry")
         static let userID = MigratingKey(current: "io.attrikit.user-id", legacy: "io.attrkit.user-id")
@@ -162,6 +196,7 @@ actor SDKStorage {
         static let deletionTombstone = "io.attrikit.deletion-tombstone"
         static let consumedTokens = "io.attrikit.consumed-link-tokens"
         static let pendingRevocation = "io.attrikit.pending-revocation"
+        static let consentReceipts = "io.attrikit.consent-receipts"
     }
 
     private static let maxConsumedTokens = 128
@@ -210,6 +245,16 @@ actor SDKStorage {
         migratedString(for: Key.consent).flatMap(AttriKitConsent.init(rawValue:)) ?? .unknown
     }
 
+    /// Keeps the defaults fallback in step with the keychain identity.
+    ///
+    /// Only writes when the value differs, so a launch that changes nothing does not touch
+    /// UserDefaults on every start.
+    private func mirrorFallbackInstallation(_ id: UUID) {
+        let value = id.uuidString.lowercased()
+        if migratedString(for: Key.fallbackInstallation) == value { return }
+        defaultsBox.value.set(value, forKey: Key.fallbackInstallation.current)
+    }
+
     func initializeIdentities() throws -> InstallationIdentity {
         // Keychain persistence is the reinstall-lineage rail, but its failure (missing
         // entitlement, device-locked windows, sandbox quirks) must never zero out
@@ -222,6 +267,11 @@ actor SDKStorage {
             if let existing = try keychain.read() {
                 installationID = existing
                 lineagePresent = true
+                // Mirror into the defaults fallback so a LATER keychain-unavailable launch reuses
+                // this id instead of minting a new one. Without it the fallback was write-only in
+                // the failure path and always empty when first needed. Same class of value the
+                // failure path already stores there, so this widens no exposure.
+                mirrorFallbackInstallation(existing)
             } else if let legacy = try legacyKeychain?.read() {
                 installationID = legacy
                 try? keychain.write(legacy)
@@ -230,8 +280,14 @@ actor SDKStorage {
                 installationID = UUID()
                 try keychain.write(installationID)
                 lineagePresent = false
+                mirrorFallbackInstallation(installationID)
             }
         } catch {
+            // The fallback slot is only useful if something ever WROTE to it. Until now nothing did
+            // on the success path, so the first keychain-unavailable launch found it empty and
+            // minted a NEW UUID: a device locked at launch reported a different installation_id
+            // than the launch before and after it, which the server reads as a different install.
+            // The mirror below fixes the cause; this branch now reuses it.
             let fallback = migratedString(for: Key.fallbackInstallation).flatMap(UUID.init(uuidString:))
             installationID = fallback ?? UUID()
             if fallback == nil {
@@ -298,6 +354,16 @@ actor SDKStorage {
         defaultsBox.value.set(try attriKitJSONEncoder().encode(tombstone), forKey: Key.deletionTombstone)
     }
 
+    /// Whether this token has not been seen, WITHOUT marking it seen.
+    ///
+    /// Exists so acceptExactToken can refuse a repeat without spending the token before the
+    /// identify that carries it has been acknowledged. Consuming first meant a process killed
+    /// mid-flight burned the only deterministic attribution signal the SDK has, with no failure
+    /// for anything to react to.
+    func isExactTokenNew(_ token: String) -> Bool {
+        !(defaultsBox.value.stringArray(forKey: Key.consumedTokens) ?? []).contains(token)
+    }
+
     func consumeExactTokenIfNew(_ token: String) -> Bool {
         var tokens = defaultsBox.value.stringArray(forKey: Key.consumedTokens) ?? []
         guard !tokens.contains(token) else { return false }
@@ -307,6 +373,23 @@ actor SDKStorage {
         }
         defaultsBox.value.set(tokens, forKey: Key.consumedTokens)
         return true
+    }
+
+    /// Undoes `consumeExactTokenIfNew` when the identify carrying the token was never acknowledged.
+    ///
+    /// An ak1_ token is the only deterministic attribution signal the SDK has, and it was marked
+    /// consumed on disk BEFORE the network call that delivers it, so any failure burned it
+    /// permanently and silently downgraded the install to probabilistic matching.
+    ///
+    /// Releasing is safe against a double send: the server treats a repeat from the SAME occurrence
+    /// as valid and reserves "replay" for a DIFFERENT one
+    /// (`apps/link/src/ingestion/repository.ts:421`), so re-delivering the token this device already
+    /// sent is idempotent by that contract rather than by luck.
+    func releaseConsumedToken(_ token: String) {
+        var tokens = defaultsBox.value.stringArray(forKey: Key.consumedTokens) ?? []
+        guard let index = tokens.lastIndex(of: token) else { return }
+        tokens.remove(at: index)
+        defaultsBox.value.set(tokens, forKey: Key.consumedTokens)
     }
 
     func setUserID(_ userID: String?) {
@@ -326,7 +409,121 @@ actor SDKStorage {
         else { removeValues(for: Key.retry) }
     }
 
-    func nextSessionIndex() -> Int {
+    /// The exact first-open body, persisted so a relaunch sends a byte-identical payload.
+    ///
+    /// The server hashes the WHOLE envelope (`payloadDigest` = sha256 of the JSON), so "same
+    /// install again" is only a clean `duplicate` — rather than a 409 `idempotency_conflict` —
+    /// if every byte matches. `submitFirstOpen` used to rebuild the envelope with
+    /// `occurredAt: configuration.now()` on every launch, so launch 2 hashed differently from
+    /// launch 1 and conflicted; the 409 is handled as a registration, but a persisted body
+    /// makes the ordinary relaunch the duplicate it always was. Android already did this.
+    ///
+    /// The body is scoped to both its epoch and its producing consent. An epoch rotation or any
+    /// consent change makes the stored bytes stale, and a stale body is discarded on read.
+    private struct PersistedFirstOpenBody: Codable {
+        let installEpochID: UUID
+        let consent: AttriKitConsent?
+        let body: Data
+    }
+
+    func setFirstOpenBody(_ body: Data?, installEpochID: UUID?, consent: AttriKitConsent?) throws {
+        if let body, let installEpochID, let consent {
+            defaultsBox.value.set(
+                try JSONEncoder().encode(PersistedFirstOpenBody(
+                    installEpochID: installEpochID,
+                    consent: consent,
+                    body: body
+                )),
+                forKey: Key.firstOpenBody
+            )
+        } else {
+            defaultsBox.value.removeObject(forKey: Key.firstOpenBody)
+        }
+    }
+
+    func firstOpenBody(installEpochID: UUID, consent: AttriKitConsent) -> Data? {
+        guard let stored = defaultsBox.value.data(forKey: Key.firstOpenBody) else { return nil }
+        guard let persisted = try? JSONDecoder().decode(PersistedFirstOpenBody.self, from: stored),
+              persisted.installEpochID == installEpochID,
+              persisted.consent == consent else {
+            defaultsBox.value.removeObject(forKey: Key.firstOpenBody)
+            return nil
+        }
+        return persisted.body
+    }
+
+    /// Adds a consent transition to durable storage before any delivery is attempted.
+    ///
+    /// The stable idempotency key survives a crash after the server accepts the receipt but before
+    /// this process can acknowledge it locally. Replaying that record is therefore safe.
+    func enqueueConsentReceipt(_ receipt: StoredConsentReceipt) throws {
+        var receipts = try consentReceipts()
+        receipts.append(receipt)
+        defaultsBox.value.set(try attriKitJSONEncoder().encode(receipts), forKey: Key.consentReceipts)
+    }
+
+    func nextConsentReceipt(deliverGrants: Bool = true) throws -> StoredConsentReceipt? {
+        try consentReceipts().first { receipt in
+            switch receipt.kind {
+            case .grant: deliverGrants
+            case .withdrawal: true
+            case nil: false
+            }
+        }
+    }
+
+    func acknowledgeConsentReceipt(idempotencyKey: UUID) throws {
+        var receipts = try consentReceipts()
+        guard let index = receipts.firstIndex(where: { $0.idempotencyKey == idempotencyKey }) else { return }
+        let acknowledged = receipts[index]
+        if acknowledged.kind == .withdrawal {
+            // A withdrawal may bypass an older grant while consent is off. Once the server has
+            // acknowledged that withdrawal, sending the stale grant on a future regrant would
+            // restore processing for the old epoch. Remove only grants the withdrawal supersedes.
+            receipts.removeAll { receipt in
+                receipt.idempotencyKey == idempotencyKey
+                    || (receipt.kind == .grant
+                        && receipt.installationID == acknowledged.installationID
+                        && receipt.installEpochID == acknowledged.installEpochID
+                        && receipt.occurredAt <= acknowledged.occurredAt)
+            }
+        } else {
+            receipts.remove(at: index)
+        }
+        if receipts.isEmpty {
+            defaultsBox.value.removeObject(forKey: Key.consentReceipts)
+        } else {
+            defaultsBox.value.set(try attriKitJSONEncoder().encode(receipts), forKey: Key.consentReceipts)
+        }
+    }
+
+    func pendingConsentReceipts() throws -> [StoredConsentReceipt] {
+        try consentReceipts()
+    }
+
+    #if DEBUG
+    /// Test-only gate, fired by the FIRST caller only and then cleared.
+    ///
+    /// `applicationDidBecomeActive` suspends here, between its activation guards and the
+    /// assignment of `activeSession`. That window is where duplicate activations and a
+    /// concurrent wipe do their damage, and nothing in a test could hold it open: this is a
+    /// plain actor hop over synchronous work, so a raced test only overlapped by luck. It did
+    /// not: with the duplicate-start guard deleted, the raced test still passed five times out
+    /// of five, meaning it asserted nothing about the hazard it was named for. This makes the
+    /// window openable on demand so those tests can fail for the right reason.
+    private var sessionIndexGate: (@Sendable () async -> Void)?
+    func setSessionIndexGate(_ gate: (@Sendable () async -> Void)?) { sessionIndexGate = gate }
+    /// Reads the counter WITHOUT consuming an index, unlike `nextSessionIndex()`.
+    func currentSessionIndexForTesting() -> Int { max(0, defaultsBox.value.integer(forKey: Key.sessionIndex)) }
+    #endif
+
+    func nextSessionIndex() async -> Int {
+        #if DEBUG
+        if let gate = sessionIndexGate {
+            sessionIndexGate = nil
+            await gate()
+        }
+        #endif
         let current = max(0, defaultsBox.value.integer(forKey: Key.sessionIndex))
         let next = current == Int.max ? Int.max : current + 1
         defaultsBox.value.set(next, forKey: Key.sessionIndex)
@@ -340,13 +537,27 @@ actor SDKStorage {
 
     @discardableResult
     func enqueue(_ event: EventEnvelope, now: Date = Date()) throws -> Bool {
-        var queue = (try? readQueue()) ?? QueueFile()
+        // `try?` made an UNREADABLE queue file indistinguishable from an absent one, and the write
+        // at the end of this function then replaced every queued event with this single one.
+        //
+        // readQueue() already returns an empty queue without throwing for both benign cases: a file
+        // that does not exist, and one that fails to decode (quarantined first). What is left is
+        // `Data(contentsOf:)` failing on a file that DOES exist, which on iOS routinely means the
+        // device has not been unlocked since boot: writeQueue sets
+        // NSFileProtectionCompleteUntilFirstUserAuthentication, so a background launch before first
+        // unlock cannot read it. Dropping one event there is recoverable; dropping the queue is not.
+        //
+        // nextEventBatch below already calls `try readQueue()`, so this matches the file's own
+        // convention. queuedEvents keeps its `try?` deliberately: it writes back only when the
+        // event count changed, which the empty fallback cannot trigger, so it loses nothing.
+        var queue = try readQueue()
         let pendingEventIDs = Set(queue.pendingBatch?.eventIDs ?? [])
         queue.events.removeAll {
             !pendingEventIDs.contains($0.eventID) && now.timeIntervalSince($0.occurredAt) > maxAge
         }
         queue.events.append(event)
 
+        var evicted = 0
         while queue.events.count > maxEvents || encodedSize(queue.events) > maxBytes {
             guard let removable = queue.events.firstIndex(where: {
                 !pendingEventIDs.contains($0.eventID) && !isProtected($0)
@@ -359,6 +570,20 @@ actor SDKStorage {
                 break
             }
             queue.events.remove(at: removable)
+            evicted += 1
+        }
+        if evicted > 0 {
+            // These are UNSENT events being destroyed to make room, which is the queue working as
+            // designed under pressure - but it happened with no trace at all, so a device dropping
+            // events for hours looked identical to one with nothing to send. One line per enqueue
+            // that evicts, not per event, so a backlog does not drown the log it needs to appear in.
+            #if canImport(os)
+            os_log(
+                .error,
+                "AttriKit: the offline queue evicted %d unsent event(s) to stay within its capacity. They are lost. This means events are being produced faster than they can be delivered, or delivery has been failing for a long time.",
+                evicted
+            )
+            #endif
         }
         try writeQueue(queue)
         return queue.events.contains { $0.eventID == event.eventID }
@@ -474,6 +699,13 @@ actor SDKStorage {
         defaultsBox.value.removeObject(forKey: Key.sessionIndex)
         defaultsBox.value.removeObject(forKey: Key.consumedTokens)
         defaultsBox.value.removeObject(forKey: Key.pendingRevocation)
+        defaultsBox.value.removeObject(forKey: Key.consentReceipts)
+        // The persisted first-open envelope, which deleteAll did not clear. It is the one stored
+        // value that carries the whole first-open body verbatim, so a successful deleteData() left
+        // the most identifying artifact the SDK holds sitting in UserDefaults while reporting the
+        // erasure complete. It is keyed by install epoch, and the epoch above is gone, so nothing
+        // could ever read it again either: it was unreachable data the user had asked us to delete.
+        defaultsBox.value.removeObject(forKey: Key.firstOpenBody)
         if let firstError { throw firstError }
     }
 
@@ -485,6 +717,11 @@ actor SDKStorage {
     private func pendingRevocation() -> PendingRevocation? {
         guard let data = defaultsBox.value.data(forKey: Key.pendingRevocation) else { return nil }
         return try? attriKitJSONDecoder().decode(PendingRevocation.self, from: data)
+    }
+
+    private func consentReceipts() throws -> [StoredConsentReceipt] {
+        guard let data = defaultsBox.value.data(forKey: Key.consentReceipts) else { return [] }
+        return try attriKitJSONDecoder().decode([StoredConsentReceipt].self, from: data)
     }
 
     private func migratedString(for key: MigratingKey) -> String? {

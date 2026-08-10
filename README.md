@@ -99,10 +99,28 @@ let result = await AttriKitLinkToken.consumePasteboard()
 First-open delivery is idempotent on the server (retries of the same install epoch
 never double-count; a reinstall is recorded as its own epoch and classified
 separately, never billed twice) and retried on a bounded schedule: one initial attempt plus up to six
-retries (5s → 30s → 5m → 1h → 3h → 6h, within ~24h of the first failure). Event batches
+retries (5s → 30s → 5m → 1h → 3h → 6h, within ~24h of the first failure). When first-open is
+accepted but matching is still pending, the attribution poll is bounded the same way: it ramps from
+250ms to a 5-second ceiling for the first minute, then follows that same ladder, waits at least as
+long as a `Retry-After` header asks (clamped to six hours), and once the schedule is exhausted or the
+~24h window closes it stops and leaves the result UNKNOWN: `attribution(timeout:)` answers
+`.timedOut`, never `.unattributed`. Exhaustion means AttrKit stopped asking, not that the install
+had no attribution, and the answer is cached for the process lifetime, so claiming the stronger of
+the two would make a match that had simply not landed yet permanently wrong. Event batches
 flush immediately after enqueue, retrying with backoff starting at one second and
 capped at one minute. The full wire
 contract lives at https://attrikit.io/en/docs/ingest-api.
+
+To allow the retry ladder to request background execution, the host app must declare the SDK's
+public `AttriKit.backgroundRetryTaskIdentifier` in its Info.plist. If this declaration is absent,
+iOS rejects the submission and AttriKit reports the failure through the system log:
+
+```xml
+<key>BGTaskSchedulerPermittedIdentifiers</key>
+<array>
+    <string>io.attrikit.sdk.retry</string>
+</array>
+```
 
 ## Engagement signals
 
@@ -145,6 +163,9 @@ Task {
     AttriKit.start(apiKey: "YOUR_PUBLISHABLE_KEY", consent: sdkConsent)
 }
 ```
+
+If `requestConsent()` is called while the application is inactive or backgrounded, it waits for
+the next active state before invoking Apple's ATT prompt and records that wait in the system log.
 
 `AttriKitTracking.advertisingIdentifier` is non-nil only while ATT is authorized and
 never returns Apple's all-zero sentinel. `AttriKitTracking.vendorIdentifier` exposes
