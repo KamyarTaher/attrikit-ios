@@ -77,6 +77,7 @@ public struct AttriKitEvent: Hashable, Sendable {
 
 public struct Attribution: Codable, Equatable, Sendable {
     public let method: String
+    public let sourceType: String?
     public let network: String?
     public let campaignID: String?
     public let finality: String
@@ -84,9 +85,29 @@ public struct Attribution: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case method, network, finality
+        case sourceType = "source_type"
         case campaignID = "campaign_id"
         case policyVersion = "policy_version"
     }
+
+    /// Deterministic campaign context suitable for paywall placement parameters or user attributes.
+    /// Probabilistic, modeled, and unattributed methods intentionally produce no user-level context.
+    public var placementParameters: [String: String] {
+        guard Self.deterministicMethods.contains(method) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: [
+            ("attrkit_method", Optional(method)),
+            ("attrkit_network", network),
+            ("attrkit_campaign_id", campaignID),
+            ("attrkit_source_type", sourceType),
+        ].compactMap { key, value in value.map { (key, $0) } })
+    }
+
+    private static let deterministicMethods: Set<String> = [
+        "deterministic",
+        "platform_verified",
+        "exact_single_use",
+        "customer_signed",
+    ]
 }
 
 public enum AttributionResult: Equatable, Sendable {

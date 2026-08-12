@@ -3,9 +3,6 @@ import Foundation
 import FoundationNetworking
 #endif
 import XCTest
-#if canImport(OSLog)
-import OSLog
-#endif
 @testable import AttriKitCore
 
 @MainActor
@@ -528,15 +525,16 @@ final class RuntimeHardeningTests: XCTestCase {
     }
 
     func testPermanentFailureOnASingleEventBatchReportsTheDrop() async throws {
-        #if canImport(OSLog)
-        let store = try OSLogStore(scope: .currentProcessIdentifier)
-        let startPosition = store.position(date: Date())
-
+        let diagnostics = DiagnosticRecorder()
         let storage = makeStorage(label: "SingleEventDrop")
         let identity = try await storage.initializeIdentities()
         try await storage.enqueue(makeEvent(name: "session_end", identity: identity))
 
-        let runtime = makeRuntime(storage: storage, transport: statusTransport(422))
+        let runtime = makeRuntime(
+            storage: storage,
+            transport: statusTransport(422),
+            diagnostic: { diagnostics.record($0) }
+        )
         await runtime.start(apiKey: apiKey, consent: .measurementGranted)
 
         let drained = await waitUntil(timeout: .seconds(5)) {
@@ -544,23 +542,13 @@ final class RuntimeHardeningTests: XCTestCase {
         }
         XCTAssertTrue(drained, "a permanent 4xx on a lone event must still drain the queue")
 
-        var reported = false
-        for _ in 0..<12 where !reported {
-            let entries = try store.getEntries(at: startPosition)
-            for entry in entries
-            where entry.composedMessage.contains("permanently dropping event 'session_end'") {
-                reported = true
-                break
+        let reported = await waitUntil {
+            diagnostics.messages.contains {
+                $0.contains("permanently dropping event 'session_end'")
             }
-            if !reported { try? await Task.sleep(for: .milliseconds(50)) }
         }
         XCTAssertTrue(reported, "the destroyed event must be reported, not lost silently")
         await runtime.shutdown()
-        #else
-        // Without this the whole test body compiles away and the test PASSES having asserted
-        // nothing, which reads as coverage of the drop report on platforms that have none.
-        throw XCTSkip("OSLogStore is required to observe the drop report")
-        #endif
     }
 
     /// The customer-reported cold-launch race, modelled against a server that answers TRUTHFULLY:
@@ -1253,7 +1241,8 @@ final class RuntimeHardeningTests: XCTestCase {
     private func makeRuntime(
         storage: SDKStorage,
         transport: HTTPTransport,
-        lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver()
+        lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver(),
+        diagnostic: @escaping @Sendable (String) -> Void = { _ in }
     ) -> CoreRuntime {
         CoreRuntime(configuration: AttriKitTestingConfiguration(
             baseURL: URL(string: "https://unit.test")!,
@@ -1262,7 +1251,8 @@ final class RuntimeHardeningTests: XCTestCase {
             evidence: StubEvidence(transaction: nil, adToken: nil),
             deviceEvidence: { DeviceEvidence(idfa: nil, idfv: nil) },
             now: { Date() },
-            lifecycle: lifecycle
+            lifecycle: lifecycle,
+            diagnostic: diagnostic
         ))
     }
 
@@ -1453,6 +1443,23 @@ private final class EpochRegistrationGate: @unchecked Sendable {
     func recordAcceptedConsent() {
         lock.lock(); defer { lock.unlock() }
         acceptedConsent += 1
+    }
+}
+
+private final class DiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var messages: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(_ message: String) {
+        lock.lock()
+        recorded.append(message)
+        lock.unlock()
     }
 }
 

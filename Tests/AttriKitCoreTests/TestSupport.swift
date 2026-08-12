@@ -197,7 +197,8 @@ func makeTestConfiguration(
     evidence: PlatformEvidenceProviding = StubEvidence(transaction: nil, adToken: nil),
     deviceEvidence: DeviceEvidence = DeviceEvidence(idfa: nil, idfv: nil),
     now: @escaping @Sendable () -> Date = { Date() },
-    lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver()
+    lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver(),
+    diagnostic: @escaping @Sendable (String) -> Void = { _ in }
 ) -> AttriKitTestingConfiguration {
     let suite = defaults ?? UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
     let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
@@ -208,7 +209,8 @@ func makeTestConfiguration(
         evidence: evidence,
         deviceEvidence: { deviceEvidence },
         now: now,
-        lifecycle: lifecycle
+        lifecycle: lifecycle,
+        diagnostic: diagnostic
     )
 }
 

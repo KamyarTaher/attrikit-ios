@@ -103,8 +103,8 @@ public enum AttriKitTracking {
 
     private static func registerEvidenceProvider() {
         AttriKit.registerTrackingEvidenceProvider(
-            advertisingIdentifier: { AttriKitTracking.advertisingIdentifierWithoutRegistration },
-            vendorIdentifier: { AttriKitTracking.vendorIdentifierWithoutRegistration }
+            idfa: { AttriKitTracking.advertisingIdentifierWithoutRegistration },
+            idfv: { AttriKitTracking.vendorIdentifierWithoutRegistration }
         )
     }
 

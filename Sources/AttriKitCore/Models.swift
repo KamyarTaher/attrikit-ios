@@ -199,6 +199,7 @@ struct FirstOpenResponse: Decodable, Sendable {
 struct AttributionResponse: Decodable, Sendable {
     let status: String?
     let method: String?
+    let sourceType: String?
     let network: String?
     let campaignID: String?
     let finality: String?
@@ -206,13 +207,14 @@ struct AttributionResponse: Decodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case status, method, network, finality
+        case sourceType = "source_type"
         case campaignID = "campaign_id"
         case policyVersion = "policy_version"
     }
 
     var attribution: Attribution? {
         guard let method, let finality, let policyVersion else { return nil }
-        return Attribution(method: method, network: network, campaignID: campaignID, finality: finality, policyVersion: policyVersion)
+        return Attribution(method: method, sourceType: sourceType, network: network, campaignID: campaignID, finality: finality, policyVersion: policyVersion)
     }
 }
 

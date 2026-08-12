@@ -562,6 +562,63 @@ final class AttriKitCoreTests: XCTestCase {
         XCTAssertEqual(cachedRequestCount, requestCount)
     }
 
+    func testPlacementParametersBridgeCarriesOnlyDeterministicCampaignContext() async {
+        let transport = StubTransport { _, _ in
+            successResult(body: #"{"receipt_id":"r","status":"matched","attribution":{"method":"exact_single_use","source_type":"exact_token","network":"meta","campaign_id":"campaign-1","finality":"final","policy_version":1}}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        let parameters = await AttriKit.placementParameters(timeout: .seconds(1))
+
+        XCTAssertEqual(parameters, [
+            "attrkit_method": "exact_single_use",
+            "attrkit_network": "meta",
+            "attrkit_campaign_id": "campaign-1",
+            "attrkit_source_type": "exact_token",
+        ])
+    }
+
+    func testPlacementParametersRejectEveryNonDeterministicGrade() {
+        for method in ["device_matched", "local_signals_only", "modeled_p50", "unattributed"] {
+            let attribution = Attribution(
+                method: method,
+                sourceType: "device_match",
+                network: "meta",
+                campaignID: "must-not-leak",
+                finality: "final",
+                policyVersion: 1
+            )
+            XCTAssertEqual(attribution.placementParameters, [:], "method \(method) leaked user-level context")
+        }
+    }
+
+    func testPlacementParametersAcceptEveryDeterministicGrade() {
+        for method in ["deterministic", "platform_verified", "exact_single_use", "customer_signed"] {
+            let attribution = Attribution(
+                method: method,
+                sourceType: nil,
+                network: "meta",
+                campaignID: "campaign-1",
+                finality: "final",
+                policyVersion: 1
+            )
+            XCTAssertEqual(attribution.placementParameters["attrkit_method"], method)
+            XCTAssertEqual(attribution.placementParameters["attrkit_campaign_id"], "campaign-1")
+        }
+    }
+
+    func testPlacementParametersReturnsEmptyForEveryUnresolvedState() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":500}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        let parameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
+        XCTAssertEqual(parameters, [:])
+    }
+
     func testAttributionTimeoutPath() async {
         let transport = StubTransport { _, _ in successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":500}"#) }
         await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))

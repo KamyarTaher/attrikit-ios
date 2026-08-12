@@ -37,6 +37,14 @@ public enum AttriKit {
         await facade.withRuntime { core in await core.attribution(timeout: timeout) }
     }
 
+    /// Returns deterministic attribution as placement parameters for Superwall or another
+    /// paywall/user-attribute SDK. Call before the first campaign-sensitive placement.
+    /// Non-deterministic, unresolved, or consent-blocked attribution returns an empty dictionary.
+    public static func placementParameters(timeout: Duration = .seconds(2)) async -> [String: String] {
+        guard case .attributed(let attribution) = await attribution(timeout: timeout) else { return [:] }
+        return attribution.placementParameters
+    }
+
     public static func handle(_ url: URL) async -> DeepLinkResult {
         await facade.withRuntime { core in await core.handle(url) }
     }
@@ -71,12 +79,12 @@ public enum AttriKit {
 
     @_spi(AttriKitTracking)
     public static func registerTrackingEvidenceProvider(
-        advertisingIdentifier: @escaping @Sendable () -> UUID?,
-        vendorIdentifier: @escaping @Sendable () -> UUID?
+        idfa: @escaping @Sendable () -> UUID?,
+        idfv: @escaping @Sendable () -> UUID?
     ) {
         deviceEvidenceRegistry.install(
-            advertisingIdentifier: advertisingIdentifier,
-            vendorIdentifier: vendorIdentifier
+            idfa: idfa,
+            idfv: idfv
         )
     }
 
@@ -96,21 +104,21 @@ public enum AttriKit {
 
 private final class DeviceEvidenceRegistry: @unchecked Sendable {
     private let lock = NSLock()
-    private var advertisingIdentifier: @Sendable () -> UUID? = { nil }
-    private var vendorIdentifier: @Sendable () -> UUID? = { nil }
+    private var idfa: @Sendable () -> UUID? = { nil }
+    private var idfv: @Sendable () -> UUID? = { nil }
 
     func install(
-        advertisingIdentifier: @escaping @Sendable () -> UUID?,
-        vendorIdentifier: @escaping @Sendable () -> UUID?
+        idfa: @escaping @Sendable () -> UUID?,
+        idfv: @escaping @Sendable () -> UUID?
     ) {
         lock.lock()
-        self.advertisingIdentifier = advertisingIdentifier
-        self.vendorIdentifier = vendorIdentifier
+        self.idfa = idfa
+        self.idfv = idfv
         lock.unlock()
     }
 
     func current() -> DeviceEvidence {
-        let providers = locked { (advertisingIdentifier, vendorIdentifier) }
+        let providers = locked { (idfa, idfv) }
         return DeviceEvidence(idfa: providers.0(), idfv: providers.1())
     }
 

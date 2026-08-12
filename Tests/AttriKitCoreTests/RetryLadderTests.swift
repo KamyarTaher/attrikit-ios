@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(OSLog)
-import OSLog
-#endif
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -93,17 +90,17 @@ final class RetryLadderTests: XCTestCase {
     /// falls out. Before the fix that exit wrote nothing at all, and `attribution(timeout:)`
     /// answered `.timedOut` forever with no way to tell a lost match from a stopped poll.
     func testLosingMeasurementNetworkingMidPollIsReported() async throws {
-        #if canImport(OSLog)
-        let store = try OSLogStore(scope: .currentProcessIdentifier)
-        let startPosition = store.position(date: Date())
-
+        let diagnostics = DiagnosticRecorder()
         let transport = StubTransport { request, _ in
             if request.url?.path.hasSuffix("/v1/ingest/first-open") == true {
                 return successResult(status: 202, body: #"{"status":"pending","retry_after_ms":0}"#)
             }
             return successResult(status: 503, body: "")
         }
-        let runtime = CoreRuntime(configuration: makeTestConfiguration(transport: transport))
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport,
+            diagnostic: { diagnostics.record($0) }
+        ))
         await runtime.start(apiKey: apiKey, consent: .measurementGranted)
 
         let polling = await waitUntil { await self.attributionRequestCount(transport) >= 1 }
@@ -113,15 +110,10 @@ final class RetryLadderTests: XCTestCase {
         // stop that must stay quiet. This is the path that used to die in silence.
         await runtime.setConsent(.unknown)
 
-        var reported = false
-        for _ in 0..<40 where !reported {
-            let entries = try store.getEntries(at: startPosition)
-            for entry in entries
-            where entry.composedMessage.contains("attribution poll stopped because measurement networking is unavailable") {
-                reported = true
-                break
+        let reported = await waitUntil {
+            diagnostics.messages.contains {
+                $0.contains("attribution poll stopped because measurement networking is unavailable")
             }
-            if !reported { try? await Task.sleep(for: .milliseconds(50)) }
         }
         XCTAssertTrue(reported, "a poll that stops for lack of networking must say so")
         // .consentRequired, not .timedOut: with consent back at .unknown the API names the actual
@@ -131,9 +123,6 @@ final class RetryLadderTests: XCTestCase {
         XCTAssertEqual(answer, .consentRequired, "a poll stopped by consent must say so, never .unattributed")
         XCTAssertNotEqual(answer, .unattributed, "exhaustion and consent loss are never an attribution verdict")
         await runtime.shutdown()
-        #else
-        throw XCTSkip("OSLogStore is required to observe the give-up log")
-        #endif
     }
 
     // DELIBERATELY ABSENT: a frozen-clock termination test.

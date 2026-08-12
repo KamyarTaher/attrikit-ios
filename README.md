@@ -22,7 +22,9 @@ For a package manifest:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.1.0"),
+    // 2.2.1 restores the privacy manifests' empty tracking-domain lists; 2.2.0
+    // could block ingest and erasure when ATT was not authorized.
+    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.2.1"),
 ]
 ```
 
@@ -50,7 +52,11 @@ AttriKit.start(apiKey: "YOUR_PUBLISHABLE_KEY", consent: .measurementGranted)
 AttriKit.track(try AttriKitEvent("trial_started"), properties: ["plan": "annual"])
 ```
 
-Do not put email addresses or phone numbers in event properties. When a user supplies
+Do not put email addresses or phone numbers in event properties, and note what happens if you do:
+the whole event is refused, not the offending property. The key check is a SUBSTRING match on
+`email|e-mail|phone|mobile|address|name`, so `product_name`, `campaign_name` and `mobile_os` are
+refused too. String values that look like an email or a phone number, or exceed 1024 bytes, refuse
+the event the same way. The rejected key is logged; the value never is. When a user supplies
 first-party funnel identity, use the dedicated API. It normalizes and SHA-256 hashes the
 values synchronously on-device and never persists the raw input:
 
@@ -139,6 +145,22 @@ session tracking before startup (or at any later point):
 ```swift
 AttriKit.setSessionTrackingEnabled(false)
 ```
+
+## Campaign-personalized paywalls
+
+Resolve deterministic campaign context before the first campaign-sensitive placement and pass
+the returned dictionary as placement parameters or user attributes. The bridge is vendor-neutral,
+so it works with Superwall without linking Superwall into AttriKitCore:
+
+```swift
+let parameters = await AttriKit.placementParameters(timeout: .seconds(2))
+Superwall.shared.register(placement: "onboarding_paywall", params: parameters)
+```
+
+The dictionary can contain `attrkit_method`, `attrkit_network`, `attrkit_campaign_id`, and
+`attrkit_source_type`. It is empty for unresolved, organic, device-matched, modeled, or otherwise
+non-deterministic attribution. AttrKit never turns a probabilistic campaign estimate into a
+user-level paywall decision.
 
 ## App Tracking Transparency (optional)
 

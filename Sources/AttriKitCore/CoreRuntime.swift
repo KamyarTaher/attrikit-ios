@@ -1117,12 +1117,9 @@ actor CoreRuntime {
     /// but it must not be silent either.
     private func finishUnreachablePoll() {
         guard attributionCache == nil else { return }
-        #if canImport(os)
-        os_log(
-            .error,
+        configuration.diagnostic(
             "AttriKit: attribution poll stopped because measurement networking is unavailable. The result stays UNKNOWN, not unattributed, and attribution(timeout:) will answer .timedOut."
         )
-        #endif
     }
 
     /// The poll gave up inside its published window.
@@ -1269,18 +1266,14 @@ actor CoreRuntime {
                     // never be silent: a lost session_end is otherwise indistinguishable from
                     // a session that never happened. Event names are schema identifiers
                     // (validated against ^[a-z][a-z0-9_.-]{0,127}$), never user data.
-                    #if canImport(os)
-                    os_log(
-                        .error,
-                        // Deliberately .public. An adversarial review flagged the name as customer-defined
-                        // (the regex constrains its SYNTAX, not its content), but the name is a
-                        // developer-authored compile-time identifier, this log is device-local, and
-                        // the message reports PERMANENT data loss where naming the destroyed event
-                        // is the entire diagnostic value. Redacting it to <private> would recreate
-                        // the silent-drop class this message exists to end. Do not flip it back.
-                        "AttriKit: permanently dropping event '\(batch.events.first?.eventName ?? "unknown", privacy: .public)' after HTTP \(response.statusCode, privacy: .public). It is deleted from the queue and will never be delivered."
+                    // The live diagnostic sink emits this message as public device-local
+                    // diagnostics: naming the destroyed event is the entire value of the report,
+                    // and redacting it would recreate the silent-drop class this message exists to
+                    // end. The injected sink also makes this invariant testable without depending
+                    // on OSLogStore availability in a host test process.
+                    configuration.diagnostic(
+                        "AttriKit: permanently dropping event '\(batch.events.first?.eventName ?? "unknown")' after HTTP \(response.statusCode). It is deleted from the queue and will never be delivered."
                     )
-                    #endif
                     try await configuration.storage.acknowledgeEventBatch(batchID: batch.batchID)
                     return .sent
                 }
