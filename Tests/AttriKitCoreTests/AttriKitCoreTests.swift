@@ -564,7 +564,7 @@ final class AttriKitCoreTests: XCTestCase {
 
     func testPlacementParametersBridgeCarriesOnlyDeterministicCampaignContext() async {
         let transport = StubTransport { _, _ in
-            successResult(body: #"{"receipt_id":"r","status":"matched","attribution":{"method":"exact_single_use","source_type":"exact_token","network":"meta","campaign_id":"campaign-1","finality":"final","policy_version":1}}"#)
+            successResult(body: #"{"receipt_id":"r","status":"matched","attribution":{"method":"exact_single_use","source_type":"owned_deferred_token","network":"meta","campaign_id":"campaign-1","finality":"final","policy_version":1}}"#)
         }
         await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
         AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
@@ -575,7 +575,7 @@ final class AttriKitCoreTests: XCTestCase {
             "attrkit_method": "exact_single_use",
             "attrkit_network": "meta",
             "attrkit_campaign_id": "campaign-1",
-            "attrkit_source_type": "exact_token",
+            "attrkit_source_type": "owned_deferred_token",
         ])
     }
 
