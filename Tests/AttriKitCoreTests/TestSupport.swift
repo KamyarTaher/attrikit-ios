@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -83,12 +84,11 @@ final class GatedEvidence: PlatformEvidenceProviding, @unchecked Sendable {
     private var gates: [Int: CheckedContinuation<Void, Never>] = [:]
 
     func appTransactionJWS() async -> String? {
-        let index = locked { () -> Int in
-            calls += 1
-            return calls
-        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            locked { gates[index] = continuation }
+            locked {
+                calls += 1
+                gates[calls] = continuation
+            }
         }
         return nil
     }
@@ -155,10 +155,20 @@ final class ManualLifecycleObserver: ApplicationLifecycleObserving, @unchecked S
         locked { handler = nil }
     }
 
-    func send(_ event: ApplicationLifecycleEvent) async {
+    /// `occurredAt` defaults to nil because most cases drive a TestDateClock, which stays
+    /// authoritative and makes the post instant redundant.
+    ///
+    /// It is a PARAMETER rather than a constant because hard-coding nil deleted every trace of
+    /// the plumbing it feeds. This is the only `ApplicationLifecycleObserving` fixture in the
+    /// package -- 30 uses across five suites -- and the real `ApplicationLifecycleObserver`
+    /// always passes a non-nil `Date()`. With nil hard-coded, no call anywhere supplied the
+    /// instant, so `occurredAt ?? configuration.now()` in CoreRuntime could be reduced to
+    /// `configuration.now()` on BOTH sides of a session, on iOS, with all 120 tests green --
+    /// re-charging the serialized delivery wait to the user's session, which is the exact
+    /// "a 100ms foreground reported as 300ms" defect the parameter was added to stop.
+    func send(_ event: ApplicationLifecycleEvent, occurredAt: Date? = nil) async {
         let callback = locked { handler }
-        // nil on purpose: these tests drive a TestDateClock, which stays authoritative.
-        await callback?(event, nil)
+        await callback?(event, occurredAt)
     }
 
     private func locked<T>(_ body: () -> T) -> T {
@@ -246,7 +256,47 @@ func gunzipStored(_ data: Data) throws -> Data {
         index += length
         if header & 0x01 == 1 { break }
     }
+    let trailer = data.count - 8
+    let expectedCRC = UInt32(data[trailer])
+        | (UInt32(data[trailer + 1]) << 8)
+        | (UInt32(data[trailer + 2]) << 16)
+        | (UInt32(data[trailer + 3]) << 24)
+    let expectedSize = UInt32(data[trailer + 4])
+        | (UInt32(data[trailer + 5]) << 8)
+        | (UInt32(data[trailer + 6]) << 16)
+        | (UInt32(data[trailer + 7]) << 24)
+    guard expectedCRC == crc32(output), expectedSize == UInt32(truncatingIfNeeded: output.count) else {
+        throw URLError(.cannotDecodeContentData)
+    }
     return output
+}
+
+private func crc32(_ data: Data) -> UInt32 {
+    var crc = UInt32.max
+    for byte in data {
+        crc ^= UInt32(byte)
+        for _ in 0..<8 {
+            crc = (crc >> 1) ^ (crc & 1 == 1 ? 0xedb88320 : 0)
+        }
+    }
+    return crc ^ UInt32.max
+}
+
+final class StoredGzipTestSupportTests: XCTestCase {
+    private let valid = Data(base64Encoded: "H4sIAAAAAAAA/wEOAPH/Y2hlY2tzdW0tcHJvYmW+DYZIDgAAAA==")!
+
+    func testGunzipStoredValidatesCRC32Trailer() throws {
+        var corrupt = valid
+        corrupt[corrupt.count - 8] ^= 0xff
+        XCTAssertThrowsError(try gunzipStored(corrupt))
+        XCTAssertEqual(try gunzipStored(valid), Data("checksum-probe".utf8))
+    }
+
+    func testGunzipStoredValidatesISizeTrailer() {
+        var corrupt = valid
+        corrupt[corrupt.count - 4] ^= 0xff
+        XCTAssertThrowsError(try gunzipStored(corrupt))
+    }
 }
 
 final class URLProtocolSpy: URLProtocol, @unchecked Sendable {

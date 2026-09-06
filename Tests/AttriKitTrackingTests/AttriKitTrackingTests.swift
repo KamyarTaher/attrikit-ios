@@ -1,12 +1,25 @@
-import AttriKitCore
+@testable import AttriKitCore
 @testable import AttriKitTracking
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 
 final class AttriKitTrackingTests: XCTestCase {
-    override func tearDown() {
+    private var defaultsSuiteNames: [String] = []
+    private var temporaryDirectories: [URL] = []
+
+    override func tearDown() async throws {
         AttriKitTracking.resetTestingConfiguration()
-        super.tearDown()
+        await AttriKit.configureForTesting(.live)
+        for suiteName in defaultsSuiteNames {
+            UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        }
+        for directory in temporaryDirectories {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try await super.tearDown()
     }
 
     func testConsentMappingCoversEveryAuthorizationState() {
@@ -26,6 +39,47 @@ final class AttriKitTrackingTests: XCTestCase {
 
         let consent = await AttriKitTracking.requestConsent()
         XCTAssertEqual(consent, .trackingGranted)
+    }
+
+    func testRequestConsentRefreshesTrackingEvidenceOnTheWire() async {
+        let idfa = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        AttriKitTracking.configureForTesting(GrantingTrackingSystem(idfa: idfa))
+        let transport = TrackingWireTransport()
+        let suiteName = "AttriKitTrackingTests.\(UUID())"
+        defaultsSuiteNames.append(suiteName)
+        let suite = UserDefaults(suiteName: suiteName)!
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AttriKitTrackingTests-\(UUID())")
+        temporaryDirectories.append(directory)
+        await AttriKit.configureForTesting(AttriKitTestingConfiguration(
+            baseURL: URL(string: "https://unit.test")!,
+            transport: transport,
+            storage: SDKStorage(
+                defaults: .init(value: suite),
+                keychain: TrackingMemoryKeychain(),
+                directory: directory
+            ),
+            evidence: TrackingEvidence(),
+            deviceEvidence: { AttriKit.currentDeviceEvidence() },
+            now: { Date(timeIntervalSince1970: 1_700_000_000) },
+            lifecycle: TrackingLifecycle()
+        ))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .trackingGranted)
+        _ = await AttriKit.attribution(timeout: .seconds(1))
+        let before = await transport.identifyCount()
+
+        let consent = await AttriKitTracking.requestConsent()
+        XCTAssertEqual(consent, .trackingGranted)
+        let refreshed = await waitUntil {
+            await transport.identifyCount() > before
+        }
+
+        XCTAssertTrue(refreshed, "requestConsent must enqueue a fresh /v1/ingest/identify request")
+        let identifyBody = await transport.latestIdentifyBody()
+        XCTAssertNotNil(
+            identifyBody?.range(of: Data(idfa.uuidString.lowercased().utf8)),
+            "the post-ATT identify must carry the IDFA that became available after authorization"
+        )
     }
 
     func testRequestConsentWaitsUntilApplicationIsActiveBeforeRequestingATT() async {
@@ -63,6 +117,7 @@ final class AttriKitTrackingTests: XCTestCase {
             PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
         let rows = try XCTUnwrap(plist["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
         let deviceID = try XCTUnwrap(rows.first)
 
         XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
@@ -111,6 +166,81 @@ final class AttriKitTrackingTests: XCTestCase {
 
         XCTAssertEqual(AttriKitTracking.vendorIdentifier, expected)
     }
+}
+
+private actor TrackingWireTransport: HTTPTransport {
+    private var identifyRequests = 0
+    private var latestIdentify: Data?
+
+    func send(_ request: URLRequest) async throws -> HTTPResult {
+        if request.url?.path == "/v1/ingest/identify" {
+            identifyRequests += 1
+            latestIdentify = request.httpBody
+        }
+        return HTTPResult(
+            statusCode: 200,
+            data: Data(#"{"receipt_id":"tracking-wire","status":"matched","attribution":{"method":"deterministic","network":"meta","campaign_id":"campaign","finality":"provisional","policy_version":1}}"#.utf8),
+            headers: [:]
+        )
+    }
+
+    func identifyCount() -> Int { identifyRequests }
+    func latestIdentifyBody() -> Data? { latestIdentify }
+}
+
+private final class GrantingTrackingSystem: TrackingSystemProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private let idfa: UUID
+    private var authorized = false
+
+    init(idfa: UUID) { self.idfa = idfa }
+
+    var authorizationStatus: TrackingAuthorizationStatus {
+        locked { authorized ? .authorized : .notDetermined }
+    }
+
+    var advertisingIdentifier: UUID? { locked { authorized ? idfa : nil } }
+    var vendorIdentifier: UUID? { nil }
+
+    func requestAuthorization() async -> TrackingAuthorizationStatus {
+        locked { authorized = true }
+        return .authorized
+    }
+
+    private func locked<Result>(_ operation: () -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
+}
+
+private final class TrackingMemoryKeychain: InstallationIDStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UUID?
+
+    func read() throws -> UUID? { locked { value } }
+    func write(_ value: UUID) throws { locked { self.value = value } }
+    func delete() throws { locked { value = nil } }
+
+    private func locked<T>(_ operation: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
+}
+
+private struct TrackingEvidence: PlatformEvidenceProviding {
+    func appTransactionJWS() async -> String? { nil }
+    func adServicesToken() async -> String? { nil }
+    func coarseContext() -> CoarseContext {
+        CoarseContext(countryCode: "CH", osMajor: "18", deviceClass: "phone", locale: "en-CH")
+    }
+    func appVersion() -> String { "1.0 (1)" }
+}
+
+private struct TrackingLifecycle: ApplicationLifecycleObserving {
+    func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void) {}
+    func stop() {}
 }
 
 private struct StubTrackingSystem: TrackingSystemProviding {

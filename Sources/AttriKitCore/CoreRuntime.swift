@@ -60,7 +60,7 @@ struct AttriKitTestingConfiguration: Sendable {
     }
 
     static let live = AttriKitTestingConfiguration(
-        baseURL: liveEndpoint(),
+        baseURL: validatedLiveEndpoint(),
         transport: URLSessionTransport(),
         storage: SDKStorage(),
         evidence: ApplePlatformEvidenceProvider(),
@@ -105,6 +105,20 @@ struct AttriKitTestingConfiguration: Sendable {
         }
         return URL(string: "https://attrikit-endpoint-not-configured.invalid")
             ?? URL(fileURLWithPath: "/attrikit-endpoint-not-configured")
+    }
+
+    private static func validatedLiveEndpoint() -> URL {
+        let url = liveEndpoint()
+        #if DEBUG
+        // The same loopback exception liveEndpoint() grants: an http 127.0.0.1/localhost endpoint
+        // in a DEBUG build is a valid live endpoint, and requiring https here discarded it (F-12250).
+        if url.scheme == "http", ["127.0.0.1", "localhost"].contains(url.host ?? "") { return url }
+        #endif
+        guard url.scheme == "https", let host = url.host, !host.isEmpty else {
+            return URL(string: "https://attrikit-endpoint-not-configured.invalid")
+                ?? URL(fileURLWithPath: "/attrikit-endpoint-not-configured")
+        }
+        return url
     }
 }
 
@@ -166,6 +180,7 @@ actor CoreRuntime {
     private var exactToken: ExactTokenReference?
     private var attributionCache: AttributionResult?
     private var firstOpenTask: Task<Void, Never>?
+    private var selectedFirstOpenBody: (installEpochID: UUID, consent: AttriKitConsent, body: Data)?
     /// Guards the slot against a STALE clear. submitFirstOpen can install a retry task into
     /// `firstOpenTask` before its own caller's `clearFirstOpenTask` runs, so a clear must prove it
     /// still owns the slot it is about to nil. Compared by generation rather than by Task identity
@@ -224,6 +239,28 @@ actor CoreRuntime {
         self.configuration = configuration
     }
 
+    private enum DeletionTombstoneState {
+        case none
+        case pending(DeletionTombstone)
+        case corrupt
+    }
+
+    private func haltCollectionForPendingDeletion() {
+        deletionPending = true
+        bufferedBeforeStart.removeAll()
+    }
+
+    private func deletionTombstoneState() async -> DeletionTombstoneState {
+        do {
+            if let tombstone = try await configuration.storage.deletionTombstone() {
+                return .pending(tombstone)
+            }
+            return .none
+        } catch {
+            return .corrupt
+        }
+    }
+
     func start(apiKey: String, consent: AttriKitConsent) async {
         guard self.apiKey == nil else {
             if self.consent != consent { await setConsent(consent) }
@@ -252,9 +289,11 @@ actor CoreRuntime {
         self.apiKey = apiKey
         self.consent = consent
         startLifecycleObservation()
-        if await configuration.storage.deletionTombstone() != nil {
-            deletionPending = true
-            bufferedBeforeStart.removeAll()
+        switch await deletionTombstoneState() {
+        case .none:
+            break
+        case .pending, .corrupt:
+            haltCollectionForPendingDeletion()
             return
         }
         if consent == .denied || consent == .revoked {
@@ -654,9 +693,13 @@ actor CoreRuntime {
     func deleteData() async throws {
         guard let apiKey else { throw AttriKitError.notStarted }
         let tombstone: DeletionTombstone
-        if let pending = await configuration.storage.deletionTombstone() {
+        switch await deletionTombstoneState() {
+        case .pending(let pending):
             tombstone = pending
-        } else {
+        case .corrupt:
+            haltCollectionForPendingDeletion()
+            throw StorageError.corruptDeletionTombstone
+        case .none:
             let currentIdentity: InstallationIdentity
             if let identity {
                 currentIdentity = identity
@@ -834,6 +877,12 @@ actor CoreRuntime {
             installEpochID: identity.installEpochID,
             consent: consent
         )
+        if persistedBody == nil,
+           let selectedFirstOpenBody,
+           selectedFirstOpenBody.installEpochID == identity.installEpochID,
+           selectedFirstOpenBody.consent == consent {
+            persistedBody = selectedFirstOpenBody.body
+        }
         // The storage read above handles every producing-consent mismatch. Keep the narrower IDFA
         // rule as defense in depth for a corrupted or migrated record that claims the current
         // consent while carrying an advertising identifier that consent does not allow.
@@ -890,8 +939,17 @@ actor CoreRuntime {
                     consent: consent
                 ) {
                     data = concurrentlyPersisted
+                } else if let selectedFirstOpenBody,
+                          selectedFirstOpenBody.installEpochID == identity.installEpochID,
+                          selectedFirstOpenBody.consent == consent {
+                    data = selectedFirstOpenBody.body
                 } else {
                     let encoded = try attriKitJSONEncoder().encode(envelope)
+                    selectedFirstOpenBody = (
+                        installEpochID: identity.installEpochID,
+                        consent: consent,
+                        body: encoded
+                    )
                     // Persist BEFORE the send: a retry after a crash must re-send these exact
                     // bytes, not a rebuild. A persistence failure degrades to the pre-existing
                     // behaviour (rebuild per launch), which the 409 case already covers.
@@ -1042,9 +1100,10 @@ actor CoreRuntime {
             .post(path: "v1/ingest/identify", body: body, idempotencyKey: UUID().uuidString.lowercased())
         // Best-effort, as it always was — identify has no durable queue — but no longer SILENT.
         // It mostly self-heals: the user id is persisted and identify re-fires after every
-        // successful first-open. The case that does not self-heal is an exact ak1_ token, which is
-        // consumed client-side before this call, so a failure here loses the highest-fidelity
-        // signal the product has. Making identify durable is the real fix and is not this change.
+        // successful first-open. An exact ak1_ token is NOT lost on failure: acceptExactToken only
+        // checks it and the token is spent below, on acknowledgement, so an unacknowledged identify
+        // leaves it re-acceptable on the next launch. Making identify durable is the real fix and
+        // is not this change.
         let outcome = try? await sendMeasurementRequest(request)
         let delivered = outcome != nil && (200..<300).contains(outcome?.statusCode ?? -1)
         if !delivered {
@@ -1156,7 +1215,23 @@ actor CoreRuntime {
                 attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
             case 204:
                 attributionCache = .unattributed
-            case 400..<500 where response.statusCode != 429 && response.statusCode != 304:
+            // `.failed` is a TERMINAL answer for this process: nothing clears the cache until the
+            // app is relaunched, so the host shows "attribution failed" for the rest of the
+            // session. It belongs only to a status that will still be wrong on the next launch.
+            //
+            // Every 4xx used to land here. 401 and 403 are the ones that cost: an app key rotated
+            // between launches, or a `disabled_app_key` 403 during a billing lapse the customer
+            // then fixes, permanently poisoned a session that would have succeeded on the next
+            // poll. 408 is a timeout — the definition of transient. The route's only permanent 4xx
+            // is 400 `invalid_install_epoch_id` (apps/link/src/ingestion/routes.ts), which this
+            // build will keep sending; it answers 202 `pending` rather than 404 for an epoch it
+            // does not know yet, so there is no not-found shape to treat as permanent either.
+            //
+            // Everything else falls through to `default`, which leaves the cache alone — the state
+            // is "we do not know yet", which is what the UI should show, and the poll ladder tries
+            // again. Deliberately asymmetric: a wrongly-permanent answer is unrecoverable within
+            // the session, a wrongly-transient one costs another request.
+            case 400:
                 attributionCache = .failed
             default:
                 break
@@ -1404,64 +1479,40 @@ actor CoreRuntime {
             let deliverGrants = consent.allowsMeasurement && firstOpenRegistered
             let deliverWithdrawals = consent.allowsMeasurement || consent == .denied || consent == .revoked
             guard deliverGrants || deliverWithdrawals else { return }
-            let receipt: StoredConsentReceipt
-            do {
-                guard let next = try await configuration.storage.nextConsentReceipt(
-                    deliverGrants: deliverGrants
-                ) else { return }
-                receipt = next
-            } catch {
-                configuration.diagnostic(
-                    "AttriKit: the durable consent receipt queue could not be read. No receipt was removed. Error: \(error)"
-                )
-                return
-            }
+            guard let receipt = await nextConsentReceipt(deliverGrants: deliverGrants) else { return }
+            guard await deliverConsentReceipt(receipt, apiKey: apiKey, deliverWithdrawals: deliverWithdrawals) else { return }
+        }
+    }
 
-            do {
-                switch receipt.kind {
-                case .grant:
-                    guard consent.allowsMeasurement, firstOpenRegistered else { return }
-                case .withdrawal:
-                    guard deliverWithdrawals else { return }
-                case nil:
-                    return
-                }
-                let payload = ConsentReceipt(
-                    installationID: receipt.installationID,
-                    installEpochID: receipt.installEpochID,
-                    scope: receipt.scope,
-                    consent: ConsentPayload(state: receipt.state, policyVersion: 1),
-                    occurredAt: receipt.occurredAt
-                )
-                let body = try attriKitJSONEncoder().encode(payload)
-                if receipt.kind == .withdrawal, Self.bodyCarriesIdfa(body) {
-                    configuration.diagnostic(
-                        "AttriKit: a withdrawal receipt unexpectedly carried IDFA. It remains queued and was not sent."
-                    )
-                    return
-                }
-                let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
-                    .post(
-                        path: "v1/ingest/consent",
-                        body: body,
-                        idempotencyKey: receipt.idempotencyKey.uuidString.lowercased()
-                    )
-                let outcome = try await sendMeasurementRequest(request)
-                guard (200..<300).contains(outcome.statusCode) else {
-                    configuration.diagnostic(
-                        "AttriKit: consent receipt for scope '\(receipt.scope)' was not acknowledged (HTTP \(outcome.statusCode)). It remains queued."
-                    )
-                    return
-                }
-                try await configuration.storage.acknowledgeConsentReceipt(
-                    idempotencyKey: receipt.idempotencyKey
-                )
-            } catch {
-                configuration.diagnostic(
-                    "AttriKit: consent receipt for scope '\(receipt.scope)' was not delivered. It remains queued. Error: \(error)"
-                )
-                return
-            }
+    private func nextConsentReceipt(deliverGrants: Bool) async -> StoredConsentReceipt? {
+        do { return try await configuration.storage.nextConsentReceipt(deliverGrants: deliverGrants) }
+        catch {
+            configuration.diagnostic("AttriKit: the durable consent receipt queue could not be read. No receipt was removed. Error: \(error)")
+            return nil
+        }
+    }
+
+    private func deliverConsentReceipt(_ receipt: StoredConsentReceipt, apiKey: String, deliverWithdrawals: Bool) async -> Bool {
+        guard receiptIsEligible(receipt, deliverWithdrawals: deliverWithdrawals) else { return false }
+        do {
+            let body = try attriKitJSONEncoder().encode(ConsentReceipt(installationID: receipt.installationID, installEpochID: receipt.installEpochID, scope: receipt.scope, consent: ConsentPayload(state: receipt.state, policyVersion: 1), occurredAt: receipt.occurredAt))
+            guard receipt.kind != .withdrawal || !Self.bodyCarriesIdfa(body) else { configuration.diagnostic("AttriKit: a withdrawal receipt unexpectedly carried IDFA. It remains queued and was not sent."); return false }
+            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey).post(path: "v1/ingest/consent", body: body, idempotencyKey: receipt.idempotencyKey.uuidString.lowercased())
+            let outcome = try await sendMeasurementRequest(request)
+            guard (200..<300).contains(outcome.statusCode) else { configuration.diagnostic("AttriKit: consent receipt for scope '\(receipt.scope)' was not acknowledged (HTTP \(outcome.statusCode)). It remains queued."); return false }
+            try await configuration.storage.acknowledgeConsentReceipt(idempotencyKey: receipt.idempotencyKey)
+            return true
+        } catch {
+            configuration.diagnostic("AttriKit: consent receipt for scope '\(receipt.scope)' was not delivered. It remains queued. Error: \(error)")
+            return false
+        }
+    }
+
+    private func receiptIsEligible(_ receipt: StoredConsentReceipt, deliverWithdrawals: Bool) -> Bool {
+        switch receipt.kind {
+        case .grant: return consent.allowsMeasurement && firstOpenRegistered
+        case .withdrawal: return deliverWithdrawals
+        case nil: return false
         }
     }
 
@@ -1592,22 +1643,43 @@ actor CoreRuntime {
         sessionID = UUID()
         bufferedBeforeStart.removeAll()
         exactToken = nil
+        selectedFirstOpenBody = nil
         pendingUserID = nil
         funnelIdentity = FunnelIdentity()
         resetSessionState()
-        try? await configuration.storage.wipeQueue()
+        var erasureSucceeded = true
+        do {
+            try await configuration.storage.wipeQueue()
+        } catch {
+            erasureSucceeded = false
+            configuration.diagnostic("AttriKit: queue erasure failed during consent revocation: \(error)")
+        }
         await configuration.storage.setUserID(nil)
-        try? await configuration.storage.setRetryState(nil)
+        do {
+            try await configuration.storage.setRetryState(nil)
+        } catch {
+            erasureSucceeded = false
+            configuration.diagnostic("AttriKit: retry-state erasure failed during consent revocation: \(error)")
+        }
         // The wipe rotates the epoch; a first-open body kept from the old one would be
         // discarded on read anyway, but dropping it here keeps nothing stale behind a
         // deletion request.
-        try? await configuration.storage.setFirstOpenBody(
-            nil,
-            installEpochID: nil,
-            consent: nil
-        )
-        if finalizeRevocation {
-            _ = try? await configuration.storage.finishRevocationTransition()
+        do {
+            try await configuration.storage.setFirstOpenBody(
+                nil,
+                installEpochID: nil,
+                consent: nil
+            )
+        } catch {
+            erasureSucceeded = false
+            configuration.diagnostic("AttriKit: first-open erasure failed during consent revocation: \(error)")
+        }
+        if finalizeRevocation && erasureSucceeded {
+            do {
+                _ = try await configuration.storage.finishRevocationTransition()
+            } catch {
+                configuration.diagnostic("AttriKit: revocation transition could not be finalized: \(error)")
+            }
         }
     }
 

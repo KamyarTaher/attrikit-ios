@@ -166,6 +166,7 @@ private final class AttriKitFacade: @unchecked Sendable {
             return old
         }
         old.0?.cancel()
+        if let oldTail = old.0 { await oldTail.value }
         await old.1.shutdown()
     }
 

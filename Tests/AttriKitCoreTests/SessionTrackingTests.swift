@@ -6,23 +6,81 @@ import XCTest
 final class SessionTrackingTests: XCTestCase {
     private let apiKey = String(repeating: "k", count: 20)
 
-    func testLifecycleNotificationDeliveryIsNonblockingAndBackgroundTaskBounded() throws {
+    func testLifecycleNotificationDeliveryUsesAsyncBoundedBackgroundLeaseStructure() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../../Sources/AttriKitCore/SessionLifecycle.swift")
             .standardizedFileURL
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let observerStart = try XCTUnwrap(swiftBody(
+            after: "func start(_ handler:",
+            in: source
+        ))
+        let backgroundDelivery = try XCTUnwrap(swiftBody(
+            after: "private static func deliverWithBackgroundTime(",
+            in: source
+        ))
+        let leaseStart = try XCTUnwrap(swiftBody(
+            after: "static func start(application:",
+            in: source
+        ))
+        let leaseEnd = try XCTUnwrap(swiftBody(
+            after: "func end()",
+            in: source
+        ))
 
-        XCTAssertFalse(source.contains("DispatchSemaphore"))
-        XCTAssertFalse(source.contains(".wait()"))
-        XCTAssertTrue(source.contains("deliverWithBackgroundTime(.willResignActive"))
-        XCTAssertTrue(source.contains("deliverWithBackgroundTime(.willTerminate"))
-        XCTAssertTrue(source.contains("beginBackgroundTask(withName:"))
-        XCTAssertTrue(source.contains("Task { @MainActor in lease?.end() }"))
-        XCTAssertTrue(source.contains("application.endBackgroundTask(identifier)"))
+        XCTAssertFalse(observerStart.contains("DispatchSemaphore"))
+        XCTAssertFalse(observerStart.contains(".wait()"))
+        XCTAssertTrue(observerStart.contains("deliverWithBackgroundTime(\n                        .willResignActive"))
+        XCTAssertTrue(observerStart.contains("deliverWithBackgroundTime(\n                        .willTerminate"))
+        XCTAssertTrue(backgroundDelivery.contains("BackgroundTaskLease.start("))
+        XCTAssertTrue(backgroundDelivery.contains("deliveryChain.deliver"))
+        XCTAssertTrue(backgroundDelivery.contains("defer { backgroundTask.end() }"))
+        XCTAssertTrue(leaseStart.contains("beginBackgroundTask(withName:"))
+        // UIApplication.h declares the expiration handler `NS_SWIFT_UI_ACTOR`, so it arrives already
+        // isolated to the main actor and the system runs it synchronously on the main thread. The
+        // task must be ended BEFORE that handler returns. This assertion used to require the
+        // opposite -- `Task { @MainActor in lease?.end() }` -- which returns from the handler first
+        // and ends the task on a later main-actor turn, the window in which the system terminates
+        // the app. The identifier is adopted after the call so an early expiration cannot leak it.
+        XCTAssertFalse(leaseStart.contains("Task {"))
+        XCTAssertTrue(leaseStart.contains("beginBackgroundTask(withName: name) { [weak lease] in\n                lease?.end()\n            }"))
+        XCTAssertTrue(leaseStart.contains("lease.adopt(identifier)"))
+        XCTAssertTrue(leaseEnd.contains("guard !ended else { return }"))
+        XCTAssertTrue(leaseEnd.contains("application.endBackgroundTask(identifier)"))
         // The post instant travels with the event. Timestamping at processing time charged the
         // serialized delivery wait to the user's session.
-        XCTAssertTrue(source.contains("await handler(event, occurredAt)"))
+        XCTAssertTrue(backgroundDelivery.contains("await handler(event, occurredAt)"))
+    }
+
+    func testSessionDecoderReportsEveryMalformedBatchInsteadOfTreatingItAsNoEvents() async throws {
+        let transport = StubTransport { _, _ in successResult() }
+        let endpoint = URL(string: "https://unit.test/v1/ingest/events:batch")!
+        let malformed: [(body: Data?, encoding: String?)] = [
+            (nil, "gzip"),
+            (Data("not-gzip".utf8), "br"),
+            (Data("not-gzip".utf8), "gzip"),
+            (storedGzip(Data(#"{"unexpected":[]}"#.utf8)), "gzip"),
+        ]
+        for sample in malformed {
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.httpBody = sample.body
+            if let encoding = sample.encoding {
+                request.setValue(encoding, forHTTPHeaderField: "content-encoding")
+            }
+            _ = try await transport.send(request)
+        }
+
+        let diagnosticLog = MalformedDiagnosticLog()
+        let events = await sessionEvents(in: transport) { diagnosticLog.append($0) }
+        let diagnostics = diagnosticLog.values()
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertEqual(diagnostics.count, malformed.count)
+        XCTAssertTrue(diagnostics.contains { $0.contains("missing body") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("unsupported content-encoding") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("invalid gzip") })
+        XCTAssertTrue(diagnostics.contains { $0.contains("events array") })
     }
 
     func testSessionEndUsesOrdinaryEventProtectionClass() throws {
@@ -69,26 +127,37 @@ final class SessionTrackingTests: XCTestCase {
     /// assertion (measured), so the source grep that used to duplicate it here was removed rather
     /// than kept as a second, weaker copy of a property already proven.
     ///
-    /// The OBSERVER guard is what is left, and this is a SPELLING assertion, knowingly: it passes
-    /// on a semantic regression that keeps the literal and fails on a harmless rename. It stays
-    /// only because the property cannot be driven through the real type today:
-    ///  * The synthesis lives inside `#if canImport(UIKit) && os(iOS)`. This package's tests build
-    ///    arm64e-apple-macos, where UIKit is not importable, so `ApplicationLifecycleObserver.start`
-    ///    compiles down to `_ = handler`. There is no code in this binary to drive.
-    ///  * Even on an iOS destination the trigger is the process-global
-    ///    `UIApplication.shared.applicationState`, read through a private static helper with no
-    ///    injection point. A test bundle with no host app has no UIApplication at all, so the
-    ///    synthesis could only ever be observed NOT firing; a hosted one is always `.active`, so
-    ///    the negative half of the property is unreachable from the other side.
-    ///  * `activationGeneration`, `subscriptionGeneration` and `isCurrentSubscription` are
-    ///    private, so `@testable` does not reach the gating directly either.
-    ///
-    /// What would retire this test: an injectable application-state probe on the observer, in
-    /// place of the hard-coded `sharedApplicationIfAvailable()`. With that seam the synthesis,
-    /// both generation gates, and the resign-between-capture-and-delivery drop all become
-    /// ordinary unit tests. That is a production change made for testability and belongs in its
-    /// own decision, not in a test file.
-    func testObserverColdLaunchSynthesisIsOnlyPinnedInSource() throws {
+    /// The observer's application-state probe is injectable so this macOS test drives the same
+    /// synthesis path used by UIKit. The source assertions remain as additional pins for the two
+    /// generation gates and ordered delivery structure, but they are no longer the only evidence.
+    func testObserverColdLaunchSynthesisIsOnlyPinnedInSource() async throws {
+        let activeDeliveries = LifecycleEventRecorder()
+        let activeObserver = ApplicationLifecycleObserver(applicationIsActive: { true })
+        activeObserver.start { event, occurredAt in
+            await activeDeliveries.record(event, occurredAt: occurredAt)
+        }
+
+        let synthesized = await waitUntil {
+            await activeDeliveries.count() == 1
+        }
+        let activeSnapshot = await activeDeliveries.snapshot()
+        XCTAssertTrue(synthesized, "an already-active app must receive a synthesized activation")
+        XCTAssertEqual(activeSnapshot.count, 1)
+        XCTAssertTrue(activeSnapshot.firstIsDidBecomeActive)
+        XCTAssertNotNil(activeSnapshot.firstOccurredAt)
+        activeObserver.stop()
+
+        let inactiveDeliveries = LifecycleEventRecorder()
+        let inactiveObserver = ApplicationLifecycleObserver(applicationIsActive: { false })
+        inactiveObserver.start { event, occurredAt in
+            await inactiveDeliveries.record(event, occurredAt: occurredAt)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        let inactiveCount = await inactiveDeliveries.count()
+        XCTAssertEqual(inactiveCount, 0,
+                       "an inactive app must not receive a synthesized activation")
+        inactiveObserver.stop()
+
         let observerURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../../Sources/AttriKitCore/SessionLifecycle.swift")
@@ -103,7 +172,7 @@ final class SessionTrackingTests: XCTestCase {
         // then failed the moment the block was legitimately rewritten into a guard list. Slicing at
         // the delivery call is stable under that kind of edit and still cannot match the other
         // observers.
-        guard let synthesisStart = observer.range(of: "Self.deliverInOrder { [weak self] in"),
+        guard let synthesisStart = observer.range(of: "deliveryChain.deliver { [weak self] in"),
               let synthesisEnd = observer.range(of: "await handler(.didBecomeActive, observedAt)")
         else {
             return XCTFail("synthesis block not found — this test's anchors are stale, not the code")
@@ -116,11 +185,23 @@ final class SessionTrackingTests: XCTestCase {
                       "a resign between capture and delivery must drop the synthesized activation")
         XCTAssertTrue(synthesis.contains("isCurrentSubscription(installGen)"),
                       "a replaced or stopped subscription must drop the synthesized activation")
-        // Ordering: this delivery used to bypass `deliverInOrder`, so the synthesized activation
+        // Ordering: this delivery used to bypass the subscription's DeliveryChain, so synthesis
         // could invert with a genuine resign — the exact hazard the tail exists to remove, on the
         // path that only runs when a notification was already missed.
-        XCTAssertTrue(observer.contains("Self.deliverInOrder { [weak self] in"),
-                      "the synthesized activation must be serialized through the same delivery tail")
+        guard let tailStart = observer.range(of: "private final class DeliveryChain"),
+              let tailEnd = observer.range(of: "private static func deliverAsynchronously", range: tailStart.upperBound..<observer.endIndex) else {
+            return XCTFail("delivery-tail implementation not found — source anchors are stale")
+        }
+        let tail = String(observer[tailStart.lowerBound..<tailEnd.lowerBound])
+        guard let readPrevious = tail.range(of: "let previous = tail"),
+              let replaceTail = tail.range(of: "tail = Task { @MainActor in"),
+              let awaitPrevious = tail.range(of: "await previous?.value"),
+              let runWork = tail.range(of: "await work()") else {
+            return XCTFail("delivery tail must retain and await its predecessor before work")
+        }
+        XCTAssertLessThan(readPrevious.lowerBound, replaceTail.lowerBound)
+        XCTAssertLessThan(replaceTail.lowerBound, awaitPrevious.lowerBound)
+        XCTAssertLessThan(awaitPrevious.lowerBound, runWork.lowerBound)
     }
 
     func testDidBecomeActiveBeforeIdentityResolutionStillStartsSession() async throws {
@@ -219,9 +300,16 @@ final class SessionTrackingTests: XCTestCase {
     func testDeleteDataDoesNotWedgeSessionTracking() async throws {
         let clock = TestDateClock()
         let lifecycle = ManualLifecycleObserver()
+        // The roundtrip is held open by a gate rather than by a sleep, because the interleave
+        // this test exists for has to happen INSIDE it. `deleteData` sets `deletionPending`
+        // before it issues this request, so the responder being entered is proof the window is
+        // open; a sleep only raced the unstructured deletion task, and on a loaded runner the
+        // activation could land before `deleteData` had run at all -- outside the roundtrip,
+        // green, and having exercised none of the deletionPending guards it is named for.
+        let deleteGate = TestGate()
         let transport = StubTransport { request, _ in
             if request.url?.path.contains("v1/privacy/delete") == true {
-                try? await Task.sleep(for: .milliseconds(300))
+                await deleteGate.enterAndWait()
                 return successResult()
             }
             if request.url?.path.contains("events:batch") == true {
@@ -244,8 +332,10 @@ final class SessionTrackingTests: XCTestCase {
         let deletionTask = Task { () -> Error? in
             do { try await AttriKit.deleteData(); return nil } catch { return error }
         }
-        try? await Task.sleep(for: .milliseconds(80))
+        let roundtripOpen = await deleteGate.waitUntilEntered()
+        XCTAssertTrue(roundtripOpen, "deleteData must have issued its request before the activation")
         await lifecycle.send(.didBecomeActive)
+        await deleteGate.release()
         let deletionError = await deletionTask.value
         XCTAssertNil(deletionError, "deleteData threw: \(String(describing: deletionError))")
         let deleteRequests = await transport.requests().filter { $0.url?.path.contains("privacy/delete") == true }
@@ -309,11 +399,14 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual(indexes, [1, 1, 2])
     }
 
-    func testDeniedConsentSuppressesSessionEvents() async {
+    func testDeniedConsentSuppressesSessionEvents() async throws {
         let lifecycle = ManualLifecycleObserver()
         let transport = sessionTransport()
+        let store = SuppressionStore()
         await AttriKit.configureForTesting(makeTestConfiguration(
             transport: transport,
+            defaults: store.defaults,
+            directory: store.directory,
             lifecycle: lifecycle
         ))
 
@@ -321,17 +414,32 @@ final class SessionTrackingTests: XCTestCase {
         _ = await AttriKit.attribution(timeout: .zero)
         await lifecycle.send(.didBecomeActive)
         await lifecycle.send(.willResignActive)
-        try? await Task.sleep(for: .milliseconds(50))
 
+        let queued = try await store.queuedSessionEndCount()
+        XCTAssertEqual(queued, 0, "a denied consent must not even QUEUE a session")
         let events = await sessionEvents(in: transport)
         XCTAssertTrue(events.isEmpty)
+
+        // The live control. This emptiness has no mutant that can break it -- a denied consent
+        // never runs beginMeasurement, so `identity` stays nil and every session path refuses on
+        // that alone -- which is exactly why the assertion above needs the fixture shown to
+        // SPEAK. Granting consent on the same lifecycle, transport and queue must record one.
+        AttriKit.setConsent(.measurementGranted)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        await lifecycle.send(.willResignActive)
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the same fixture must record a session once consent allows it")
     }
 
-    func testOptOutBeforeStartSuppressesSessionEvents() async {
+    func testOptOutBeforeStartSuppressesSessionEvents() async throws {
         let lifecycle = ManualLifecycleObserver()
         let transport = sessionTransport()
+        let store = SuppressionStore()
         await AttriKit.configureForTesting(makeTestConfiguration(
             transport: transport,
+            defaults: store.defaults,
+            directory: store.directory,
             lifecycle: lifecycle
         ))
 
@@ -340,17 +448,21 @@ final class SessionTrackingTests: XCTestCase {
         _ = await AttriKit.attribution(timeout: .zero)
         await lifecycle.send(.didBecomeActive)
         await lifecycle.send(.willResignActive)
-        try? await Task.sleep(for: .milliseconds(50))
 
+        let queued = try await store.queuedSessionEndCount()
+        XCTAssertEqual(queued, 0, "an opt-out before start must not even QUEUE a session")
         let events = await sessionEvents(in: transport)
         XCTAssertTrue(events.isEmpty)
     }
 
-    func testOptOutStopsAnAlreadyActiveSessionWithoutAnEndEvent() async {
+    func testOptOutStopsAnAlreadyActiveSessionWithoutAnEndEvent() async throws {
         let lifecycle = ManualLifecycleObserver()
         let transport = sessionTransport()
+        let store = SuppressionStore()
         await AttriKit.configureForTesting(makeTestConfiguration(
             transport: transport,
+            defaults: store.defaults,
+            directory: store.directory,
             lifecycle: lifecycle
         ))
 
@@ -360,8 +472,9 @@ final class SessionTrackingTests: XCTestCase {
         AttriKit.setSessionTrackingEnabled(false)
         _ = await AttriKit.attribution(timeout: .zero)
         await lifecycle.send(.willResignActive)
-        try? await Task.sleep(for: .milliseconds(50))
 
+        let queued = try await store.queuedSessionEndCount()
+        XCTAssertEqual(queued, 0, "an opt-out mid-session must not even QUEUE its session_end")
         let events = await sessionEvents(in: transport)
         XCTAssertTrue(events.isEmpty)
     }
@@ -406,22 +519,37 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual((properties["session_index"] as? NSNumber)?.intValue, 2)
     }
 
-    func testLifecycleNotificationsBeforeStartProduceNoEvents() async {
+    func testLifecycleNotificationsBeforeStartProduceNoEvents() async throws {
         let lifecycle = ManualLifecycleObserver()
         let transport = sessionTransport()
+        let store = SuppressionStore()
         await AttriKit.configureForTesting(makeTestConfiguration(
             transport: transport,
+            defaults: store.defaults,
+            directory: store.directory,
             lifecycle: lifecycle
         ))
 
         await lifecycle.send(.didBecomeActive)
         await lifecycle.send(.willResignActive)
-        try? await Task.sleep(for: .milliseconds(50))
 
+        let queued = try await store.queuedSessionEndCount()
+        XCTAssertEqual(queued, 0, "a notification before start must not even QUEUE a session")
         let events = await sessionEvents(in: transport)
         let requests = await transport.requests()
         XCTAssertTrue(events.isEmpty)
         XCTAssertTrue(requests.isEmpty)
+
+        // The live control, on this fixture, at this moment. The emptiness above is only a
+        // measurement once the same lifecycle, transport and queue are shown to SPEAK; no small
+        // mutant of the runtime can make them speak before start, because a nil api key refuses
+        // at every site independently, so the instrument is proven by starting instead.
+        AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        await lifecycle.send(.willResignActive)
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the same fixture must record a session once start() has run")
     }
 
     /// Deterministic replacement for the `async let` version of this test.
@@ -453,7 +581,8 @@ final class SessionTrackingTests: XCTestCase {
         await storage.setSessionIndexGate { await gate.enterAndWait() }
 
         let firstActivation = Task { await runtime.applicationDidBecomeActive() }
-        await gate.waitUntilEntered()
+        let firstEntered = await gate.waitUntilEntered()
+        XCTAssertTrue(firstEntered)
         // The first activation is now parked between its guards and the assignment. This is the
         // exact interleaving the duplicate-start guard exists for, and it is no longer luck.
         await runtime.applicationDidBecomeActive()
@@ -505,7 +634,8 @@ final class SessionTrackingTests: XCTestCase {
         let gate = TestGate()
         await storage.setSessionIndexGate { await gate.enterAndWait() }
         let activation = Task { await runtime.applicationDidBecomeActive() }
-        await gate.waitUntilEntered()
+        let activationEntered = await gate.waitUntilEntered()
+        XCTAssertTrue(activationEntered)
 
         // Age the parked activation so a resurrected session is distinguishable from a fresh
         // one: its startedAt was captured before the suspension, five seconds before the wipe.
@@ -568,7 +698,8 @@ final class SessionTrackingTests: XCTestCase {
         let gate = TestGate()
         await storage.setSessionIndexGate { await gate.enterAndWait() }
         let parked = Task { await runtime.applicationDidBecomeActive() }
-        await gate.waitUntilEntered()
+        let parkedEntered = await gate.waitUntilEntered()
+        XCTAssertTrue(parkedEntered)
 
         // The app leaves the foreground, stays away eight seconds, and comes back. The eight
         // seconds are spent BACKGROUNDED, between the resign and the re-activation, which is the
@@ -589,11 +720,11 @@ final class SessionTrackingTests: XCTestCase {
         let refired = await waitUntil { await reactivation.hasEntered() }
         XCTAssertTrue(refired, "the activation dropped during the in-flight start must be re-fired")
         await reactivation.release()
-        // Wait for index 2, not 1: the parked activation consumed index 1 before it ever
-        // suspended, so a >= 1 wait is satisfied before the replay runs and proves nothing about
-        // whether the session was installed before the final resign below.
-        let installed = await waitUntil { await storage.currentSessionIndexForTesting() >= 2 }
-        XCTAssertTrue(installed, "the replayed activation must install its session before the resign")
+        // The stale activation consumes index 1 only after release. Index 2 is a progress signal;
+        // the following actor call is the assignment barrier and the event below is the proof.
+        let replayAdvanced = await waitUntil { await storage.currentSessionIndexForTesting() >= 2 }
+        XCTAssertTrue(replayAdvanced)
+        await runtime.applicationDidBecomeActive()
 
         clock.advance(by: 2.0)
         await runtime.applicationWillResignActive()
@@ -636,7 +767,8 @@ final class SessionTrackingTests: XCTestCase {
         let gate = TestGate()
         await storage.setSessionIndexGate { await gate.enterAndWait() }
         let parked = Task { await runtime.applicationDidBecomeActive() }
-        await gate.waitUntilEntered()
+        let parkedEntered = await gate.waitUntilEntered()
+        XCTAssertTrue(parkedEntered)
 
         await runtime.applicationWillResignActive()
         clock.advance(by: 9.0)
@@ -653,8 +785,9 @@ final class SessionTrackingTests: XCTestCase {
         let refired = await waitUntil { await replay.hasEntered() }
         XCTAssertTrue(refired, "the pending activation must still be replayed")
         await replay.release()
-        let installed = await waitUntil { await storage.currentSessionIndexForTesting() >= 2 }
-        XCTAssertTrue(installed, "the replayed activation must install before the resign")
+        let replayAdvanced = await waitUntil { await storage.currentSessionIndexForTesting() >= 2 }
+        XCTAssertTrue(replayAdvanced)
+        await runtime.applicationDidBecomeActive()
 
         clock.advance(by: 11.0)
         await runtime.applicationWillResignActive()
@@ -707,6 +840,88 @@ final class SessionTrackingTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    /// THE ONLY TEST IN THE PACKAGE THAT SUPPLIES A POST INSTANT.
+    ///
+    /// `applicationDidBecomeActive(occurredAt:)` and `applicationWillResignActive(occurredAt:)`
+    /// both do `occurredAt ?? configuration.now()`. On iOS the real observer always passes a
+    /// non-nil `Date()` taken when the notification POSTED, while `configuration.now()` reads the
+    /// clock when the actor finally SERVICES it -- after the serialized delivery tail. Until this
+    /// case existed the whole parameter was driven by nothing: the sole lifecycle fixture in the
+    /// package hard-coded nil, so both `?? configuration.now()` expressions could be reduced to
+    /// `configuration.now()` with all 120 tests green, re-charging the wait to the user's session.
+    ///
+    /// The clock is advanced BETWEEN the post instants and the delivery, by more than the session
+    /// itself lasts, so the four readings cannot be confused. The instants are t (start posted),
+    /// t+0.5s (end posted), t+3s (start serviced) and t+7s (end serviced): honouring both post
+    /// instants gives 500ms, taking the delivery clock for both gives 4000ms, and the two mixed
+    /// readings give 7000ms and -2500ms. No combination lands back on 500. A test whose delivery
+    /// lag is smaller than its session would pass either way.
+    ///
+    /// MUTATION PIN, both directions, each RUN: `startedAt: occurredAt ?? configuration.now()`
+    /// -> `configuration.now()` fails here on the start side, and
+    /// `let endedAt = occurredAt ?? configuration.now()` -> `configuration.now()` fails on the end
+    /// side. Nothing else in the suite moves for either.
+    func testSessionIsMeasuredFromThePostInstantsRatherThanTheDeliveryClock() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = sessionTransport()
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        let foregroundedAt = clock.now()
+        // The notification posted at `foregroundedAt`; the runtime services it 3 seconds later,
+        // which is what a busy launch, a serialized delivery tail or a device under load looks
+        // like from inside the actor.
+        clock.advance(by: 3.0)
+        await runtime.applicationDidBecomeActive(occurredAt: foregroundedAt)
+
+        let backgroundedAt = foregroundedAt.addingTimeInterval(0.5)
+        clock.advance(by: 4.0)
+        await runtime.applicationWillResignActive(occurredAt: backgroundedAt)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the session must be emitted")
+        let events = await sessionEvents(in: transport)
+        let properties = try XCTUnwrap(events.first?["properties"] as? [String: Any])
+        // 500: the foreground period the USER experienced. The delivery-clock edges are four
+        // seconds apart, so replacing both post instants with configuration.now() reports 4000.
+        XCTAssertEqual((properties["duration_ms"] as? NSNumber)?.intValue, 500,
+                       "the session must be measured between the two post instants, not the two delivery instants")
+        await runtime.shutdown()
+    }
+
+    /// The fixture's own default must stay nil-passing, because 30 other uses depend on the
+    /// TestDateClock remaining authoritative for them. Without this, a fixture "fix" that started
+    /// stamping `Date()` would silently take every other session in the package off the test clock
+    /// and onto the wall clock.
+    func testTheLifecycleFixtureStillDefaultsToNoPostInstant() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = sessionTransport()
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        await lifecycle.send(.didBecomeActive)
+        clock.advance(by: 2.0)
+        await lifecycle.send(.willResignActive)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered)
+        let events = await sessionEvents(in: transport)
+        let properties = try XCTUnwrap(events.first?["properties"] as? [String: Any])
+        XCTAssertEqual((properties["duration_ms"] as? NSNumber)?.intValue, 2_000,
+                       "with no post instant supplied the test clock must remain authoritative")
+        await runtime.shutdown()
+    }
+
     private func sessionTransport() -> StubTransport {
         StubTransport { request, _ in
             if request.url?.path.contains("events:batch") == true {
@@ -727,6 +942,57 @@ final class SessionTrackingTests: XCTestCase {
     }
 }
 
+private actor LifecycleEventRecorder {
+    private var events: [(ApplicationLifecycleEvent, Date?)] = []
+
+    func record(_ event: ApplicationLifecycleEvent, occurredAt: Date?) {
+        events.append((event, occurredAt))
+    }
+
+    func count() -> Int { events.count }
+
+    func snapshot() -> (count: Int, firstIsDidBecomeActive: Bool, firstOccurredAt: Date?) {
+        guard let first = events.first else { return (0, false, nil) }
+        let isDidBecomeActive: Bool
+        switch first.0 {
+        case .didBecomeActive:
+            isDidBecomeActive = true
+        case .willResignActive, .willTerminate:
+            isDidBecomeActive = false
+        }
+        return (events.count, isDidBecomeActive, first.1)
+    }
+}
+
+/// The durable event queue the runtime writes, readable without waiting for anything.
+///
+/// The suppression tests prove an ABSENCE, and the transport alone cannot: the flush is
+/// asynchronous, so a fixed sleep only hoped a leaked session had been delivered by the time the
+/// assertion ran. `applicationWillResignActive` does not return until the envelope has reached
+/// durable storage and `ManualLifecycleObserver.send` awaits the whole handler, so this read
+/// needs no wait at all, and the queue/transport pair leaves no window: an event the flush has
+/// already drained is in the transport, one it has not is still in the queue.
+///
+/// Measured rather than assumed: with `sessionTrackingEnabled` deleted from the session guards,
+/// this read alone reports the leaked session_end, with no sleep and before the transport
+/// assertion is reached.
+private struct SuppressionStore {
+    let defaults = UserDefaults(suiteName: "AttriKitSuppression.\(UUID())")!
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("AttriKitSuppression-\(UUID())")
+
+    /// A second storage over the same suite and directory as the runtime's own, so it reads the
+    /// same queue file rather than a copy.
+    func queuedSessionEndCount() async throws -> Int {
+        let probe = SDKStorage(
+            defaults: .init(value: defaults),
+            keychain: MemoryKeychain(),
+            directory: directory
+        )
+        return try await probe.queuedEvents().filter { $0.eventName == "session_end" }.count
+    }
+}
+
 /// Lets a test park a caller inside a suspension point and hold it there.
 ///
 /// Needed because the session-index hop is a plain actor hop over synchronous work: an
@@ -734,24 +1000,25 @@ final class SessionTrackingTests: XCTestCase {
 private actor TestGate {
     private var entered = false
     private var released = false
-    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
 
     func enterAndWait() async {
         entered = true
-        for waiter in enteredWaiters { waiter.resume() }
-        enteredWaiters = []
         if released { return }
         await withCheckedContinuation { releaseWaiters.append($0) }
     }
 
-    func waitUntilEntered() async {
-        if entered { return }
-        await withCheckedContinuation { enteredWaiters.append($0) }
+    func waitUntilEntered(timeout: Duration = .seconds(2)) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if entered { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return entered
     }
 
-    /// Pollable form. `waitUntilEntered` blocks forever if the caller never arrives, which turns a
-    /// failing mutation control into a hung test instead of a red one.
+    /// Non-blocking observation used when a surrounding test already owns its own bounded poll.
     func hasEntered() -> Bool { entered }
 
     func release() {
@@ -761,14 +1028,116 @@ private actor TestGate {
     }
 }
 
-private func sessionEvents(in transport: StubTransport) async -> [[String: Any]] {
+private func sessionEvents(
+    in transport: StubTransport,
+    reportMalformed: @Sendable (String) -> Void = { XCTFail($0) }
+) async -> [[String: Any]] {
     var events: [[String: Any]] = []
     for request in await transport.requests() where request.url?.path.contains("events:batch") == true {
-        guard let compressed = request.httpBody,
-              let body = try? gunzipStored(compressed),
-              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let batch = json["events"] as? [[String: Any]] else { continue }
+        guard let compressed = request.httpBody else {
+            reportMalformed("events:batch request had a missing body")
+            continue
+        }
+        guard request.value(forHTTPHeaderField: "content-encoding")?.lowercased() == "gzip" else {
+            reportMalformed("events:batch request used an unsupported content-encoding")
+            continue
+        }
+        guard let body = try? gunzipStored(compressed) else {
+            reportMalformed("events:batch request contained invalid gzip")
+            continue
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            reportMalformed("events:batch request contained invalid JSON")
+            continue
+        }
+        guard let batch = json["events"] as? [[String: Any]] else {
+            reportMalformed("events:batch request did not contain an events array")
+            continue
+        }
         events.append(contentsOf: batch.filter { $0["event_name"] as? String == "session_end" })
     }
     return events
+}
+
+/// Returns one executable Swift body with comments removed, so source contracts cannot be
+/// satisfied by prose elsewhere in the file. The lifecycle source contains no braces in string
+/// literals, which keeps this deliberately small scanner sufficient for these scoped assertions.
+private func swiftBody(after marker: String, in source: String) -> String? {
+    let uncommented = source
+        .replacingOccurrences(
+            of: #"/\*[\s\S]*?\*/"#,
+            with: "",
+            options: .regularExpression
+        )
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .map { line -> String in
+            guard let comment = line.range(of: "//") else { return String(line) }
+            return String(line[..<comment.lowerBound])
+        }
+        .joined(separator: "\n")
+    guard let markerRange = uncommented.range(of: marker),
+          let openingBrace = uncommented[markerRange.upperBound...].firstIndex(of: "{")
+    else { return nil }
+    var depth = 0
+    for index in uncommented.indices[openingBrace...] {
+        switch uncommented[index] {
+        case "{": depth += 1
+        case "}":
+            depth -= 1
+            if depth == 0 {
+                return String(uncommented[openingBrace...index])
+            }
+        default: break
+        }
+    }
+    return nil
+}
+
+private final class MalformedDiagnosticLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func append(_ message: String) {
+        lock.lock()
+        messages.append(message)
+        lock.unlock()
+    }
+
+    func values() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
+    }
+}
+
+private func storedGzip(_ body: Data) -> Data {
+    precondition(body.count <= Int(UInt16.max))
+    let length = UInt16(body.count)
+    let inverse = ~length
+    var result = Data([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x01])
+    result.append(UInt8(length & 0xff))
+    result.append(UInt8(length >> 8))
+    result.append(UInt8(inverse & 0xff))
+    result.append(UInt8(inverse >> 8))
+    result.append(body)
+    let checksum = sessionTestCRC32(body)
+    let size = UInt32(body.count)
+    for value in [checksum, size] {
+        result.append(UInt8(value & 0xff))
+        result.append(UInt8((value >> 8) & 0xff))
+        result.append(UInt8((value >> 16) & 0xff))
+        result.append(UInt8((value >> 24) & 0xff))
+    }
+    return result
+}
+
+private func sessionTestCRC32(_ data: Data) -> UInt32 {
+    var crc = UInt32.max
+    for byte in data {
+        crc ^= UInt32(byte)
+        for _ in 0..<8 {
+            crc = (crc >> 1) ^ (crc & 1 == 1 ? 0xedb88320 : 0)
+        }
+    }
+    return crc ^ UInt32.max
 }

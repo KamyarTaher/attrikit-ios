@@ -1,6 +1,6 @@
 import Foundation
 
-let attriKitSDKVersion = "2.3.1"
+let attriKitSDKVersion = "2.3.2"
 
 struct ConsentPayload: Codable, Sendable {
     let state: AttriKitConsent
@@ -16,7 +16,16 @@ struct CoarseContext: Codable, Sendable {
     let countryCode: String?
     let osMajor: String
     let deviceClass: String
-    let locale: String
+    /// Optional because it is optional on the wire, and because a locale we cannot render as a
+    /// valid BCP-47 tag within the server's 35-character cap is better omitted than sent wrong:
+    /// the envelope is `.strict()`, so one over-long value 422s the whole first-open, and a 422 is
+    /// permanent. Swift synthesizes `encodeIfPresent` for optionals, so nil is omitted rather than
+    /// encoded as null, which `z.string().optional()` would reject.
+    let locale: String?
+
+    /// The server's own cap (`coarseContextSchema`, packages/shared/src/ingestion.ts). Named here
+    /// so the producer and the length test read the same number rather than two copies of it.
+    static let localeMaxLength = 35
 
     enum CodingKeys: String, CodingKey {
         case countryCode = "country_code"
@@ -87,6 +96,15 @@ struct FirstOpenEnvelope: Codable, Sendable {
     let idfv: LowercaseUUID?
     let localLineagePresent: Bool
     let localEpochPresent: Bool
+    /// Constant by construction, and that is a gap rather than a decision. `let` with an
+    /// initializer is excluded from the synthesized memberwise initializer, so no call site can
+    /// set it and `local_signals_conflict` is `false` in every envelope this SDK will ever send --
+    /// which makes the server's `upgrade_or_restore` classification unreachable from iOS and makes
+    /// "no conflict" indistinguishable from "the SDK cannot tell". Nothing in this SDK computes a
+    /// conflict today (Storage derives only lineage and epoch presence) and Android never passes a
+    /// non-default value either, so the field is currently inert on both platforms. Making it
+    /// settable without a producer would only move the silence; giving iOS a real conflict signal
+    /// is a product decision about the wire, not a repair.
     let localSignalsConflict = false
 
     enum CodingKeys: String, CodingKey {
@@ -231,12 +249,49 @@ func attriKitJSONDecoder() -> JSONDecoder {
     return decoder
 }
 
+/// One ISO-8601 formatter for the process, instead of one per encoded or decoded Date.
+///
+/// Building an `ISO8601DateFormatter` is what this costs: measured on this machine at 73.6us per
+/// build against 0.85us per `string(from:)` on an already-built one, an 86x ratio over 2000 dates,
+/// best-of-5. The strategies below run once per Date, so one encode of a full 100-event queue file
+/// built 200 formatters, and the flush path re-encodes prefixes of it: that constant is why
+/// `nextEventBatch` measured 13.384s at n=100 before the prefix count was bisected.
+///
+/// The formatter is configured in `init` and never mutated afterwards, and every use is inside the
+/// lock. The lock is deliberate rather than a claim about `ISO8601DateFormatter`: Foundation
+/// documents `DateFormatter` as thread-safe from iOS 7, and says nothing of the kind for this
+/// class, so sharing one across threads without serializing is an assumption this SDK would be
+/// making inside somebody else's app. An uncontended `NSLock` is nanoseconds against the 73.6us it
+/// removes.
+private final class ISO8601FractionalSecondsFormatter: @unchecked Sendable {
+    static let shared = ISO8601FractionalSecondsFormatter()
+
+    private let lock = NSLock()
+    private let formatter: ISO8601DateFormatter
+
+    private init() {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        self.formatter = formatter
+    }
+
+    func string(from date: Date) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.string(from: date)
+    }
+
+    func date(from string: String) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.date(from: string)
+    }
+}
+
 private extension JSONEncoder.DateEncodingStrategy {
     static let iso8601WithFractionalSeconds = custom { date, encoder in
         var container = encoder.singleValueContainer()
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        try container.encode(formatter.string(from: date))
+        try container.encode(ISO8601FractionalSecondsFormatter.shared.string(from: date))
     }
 }
 
@@ -244,9 +299,7 @@ private extension JSONDecoder.DateDecodingStrategy {
     static let iso8601WithFractionalSeconds = custom { decoder in
         let container = try decoder.singleValueContainer()
         let string = try container.decode(String.self)
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: string) else {
+        guard let date = ISO8601FractionalSecondsFormatter.shared.date(from: string) else {
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO-8601 timestamp")
         }
         return date

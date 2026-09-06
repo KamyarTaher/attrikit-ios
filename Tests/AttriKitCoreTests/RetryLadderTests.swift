@@ -72,10 +72,16 @@ final class RetryLadderTests: XCTestCase {
         // install; exhaustion is a fact about our polling. attribution(timeout:) returns the
         // cache forever once set, so a premature .unattributed would make a match that simply
         // had not landed yet permanently wrong. .timedOut is the honest answer.
-        let stopped = await waitUntil {
+        let firstPoll = await waitUntil {
             await self.attributionRequestCount(transport) == 1
         }
-        XCTAssertTrue(stopped, "the poll must stop once its window closes")
+        XCTAssertTrue(firstPoll, "the first poll must reach the transport")
+        // The first post-window ladder delay is 5s plus up to 25% jitter. Waiting beyond that
+        // distinguishes the elapsed-window guard from a loop that merely has not woken yet.
+        let polledAgain = await waitUntil(timeout: .seconds(7)) {
+            await self.attributionRequestCount(transport) > 1
+        }
+        XCTAssertFalse(polledAgain, "the poll must terminate, not merely sleep, once its window closes")
         let answer = await runtime.attribution(timeout: .milliseconds(1))
         XCTAssertEqual(answer, .timedOut, "an exhausted poll leaves the result unknown, not unattributed")
         let count = await attributionRequestCount(transport)
@@ -171,10 +177,31 @@ final class RetryLadderTests: XCTestCase {
         XCTAssertNil(CoreRuntime.retryAfterMilliseconds("Wed, 21 Oct 2026 07:28:00 GMT"))
     }
 
-    func testFirstOpenRetryLadderMatchesThePublishedSchedule() {
+    func testFirstOpenRetryLadderMatchesThePublishedSchedule() throws {
         XCTAssertEqual(CoreRuntime.firstOpenRetryDelays, [5, 30, 300, 3_600, 10_800, 21_600])
         XCTAssertEqual(CoreRuntime.firstOpenRetryDelays.count, 6)
         XCTAssertEqual(CoreRuntime.firstOpenRetryWindow, 86_400)
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let repositoryRoot = packageRoot
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let readme = try String(contentsOf: packageRoot.appendingPathComponent("README.md"), encoding: .utf8)
+        let llms = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("apps/web/public/llms.txt"),
+            encoding: .utf8
+        )
+        let marketing = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("apps/web/components/marketing/content.ts"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(readme.contains("5s → 30s → 5m → 1h → 3h → 6h, within ~24h"))
+        XCTAssertTrue(llms.contains("one initial attempt + up to six retries, 5s→6h backoff, ~24h window"))
+        XCTAssertTrue(marketing.contains("5s → 30s → 5m → 1h → 3h → 6h schedule"))
+        XCTAssertTrue(marketing.contains("same 24 hour window closes"))
     }
 
     func testBackgroundRetrySubmissionFailureIsReportedAndIdentifierIsDocumented() async throws {
@@ -283,7 +310,15 @@ final class RetryLadderTests: XCTestCase {
         let runtime = try XCTUnwrap(lastRuntime)
         let answer = await runtime.attribution(timeout: .milliseconds(1))
         XCTAssertEqual(answer, .timedOut, "an exhausted delivery leaves attribution UNKNOWN")
-        XCTAssertNotEqual(answer, .unattributed, "exhausting the retry schedule is never an attribution verdict")
+        // `XCTAssertNotEqual(answer, .unattributed)` restated the line above it -- distinct enum
+        // cases, so it could not fail unless that equality had already failed. The invariant it was
+        // reaching for is temporal, and it is the one the comment above states: the cache is
+        // answered FOREVER once written, so a verdict written a moment AFTER this sample is exactly
+        // as permanent and exactly as wrong. Watch the answer for a window instead of restating it.
+        let becameUnattributed = await waitUntil {
+            await runtime.attribution(timeout: .zero) == .unattributed
+        }
+        XCTAssertFalse(becameUnattributed, "exhausting the retry schedule is never an attribution verdict")
         await runtime.shutdown()
     }
 
@@ -317,7 +352,12 @@ final class RetryLadderTests: XCTestCase {
         XCTAssertEqual(count, 2, "the window must stop the chain at the delivery that discovered it")
         let answer = await second.attribution(timeout: .milliseconds(1))
         XCTAssertEqual(answer, .timedOut, "a window-expired delivery leaves attribution UNKNOWN")
-        XCTAssertNotEqual(answer, .unattributed, "the closed window is never an attribution verdict")
+        // Same substitution as the exhaustion case above: a verdict that appears just after this
+        // sample is as permanent as one present at it, and only a window can see it.
+        let becameUnattributed = await waitUntil {
+            await second.attribution(timeout: .zero) == .unattributed
+        }
+        XCTAssertFalse(becameUnattributed, "the closed window is never an attribution verdict")
         await second.shutdown()
     }
 }

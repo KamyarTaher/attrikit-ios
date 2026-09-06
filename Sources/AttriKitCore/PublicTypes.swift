@@ -58,7 +58,11 @@ public struct AttriKitEvent: Hashable, Sendable {
     public let version: Int
 
     public init(_ name: String, version: Int = 1) throws {
-        guard name.range(of: #"^[a-z][a-z0-9_.-]{0,127}$"#, options: .regularExpression) != nil else {
+        let validNameRange = name.range(
+            of: #"^[a-z][a-z0-9_.-]{0,127}$"#,
+            options: .regularExpression
+        )
+        guard validNameRange == name.startIndex..<name.endIndex else {
             throw AttriKitError.invalidEventName
         }
         guard version > 0 else { throw AttriKitError.invalidEventVersion }

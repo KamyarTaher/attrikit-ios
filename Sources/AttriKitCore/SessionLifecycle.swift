@@ -17,7 +17,12 @@ protocol ApplicationLifecycleObserving: Sendable {
 
 /// Notification-only lifecycle observation remains a complete no-op in app extensions.
 final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchecked Sendable {
+    typealias ApplicationIsActive = @MainActor @Sendable () -> Bool
+
     private let lock = NSLock()
+    /// Serializes observer registration/publication with stop(). The state lock alone protects
+    /// individual fields but cannot make the multi-step NotificationCenter installation atomic.
+    private let installationLock = NSLock()
     private var tokens: [NSObjectProtocol] = []
     /// Bumped on every resign/terminate so a synthesized "active" captured before the
     /// resign is dropped instead of starting a phantom background session.
@@ -26,11 +31,21 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
     /// subscription can never invoke a stale handler after observation stops or
     /// a new handler is installed.
     private var subscriptionGeneration = 0
+    private let applicationIsActive: ApplicationIsActive
+
+    init(applicationIsActive: ApplicationIsActive? = nil) {
+        self.applicationIsActive = applicationIsActive ?? {
+            Self.defaultApplicationIsActive()
+        }
+    }
 
     func start(_ handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void) {
         #if canImport(UIKit) && os(iOS)
         // Extensions must remain a complete no-op even if UIKit is linked into the host.
         guard Bundle.main.bundleURL.pathExtension.lowercased() != "appex" else { return }
+        #endif
+        installationLock.lock()
+        defer { installationLock.unlock() }
 
         // Bump FIRST so every closure below binds to this install: a notification from
         // an older subscription (mid-flight when it was replaced) fails the check.
@@ -40,6 +55,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         }
 
         let center = NotificationCenter.default
+        // Each subscription owns its own chain. A stopped handler that never returns therefore
+        // cannot block a later start(), and stop() does not need an unordered main-actor reset.
+        let deliveryChain = DeliveryChain()
+        #if canImport(UIKit) && os(iOS)
         let installed = [
             center.addObserver(
                 forName: UIApplication.didBecomeActiveNotification,
@@ -50,7 +69,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 // the notification was in flight — same guard as the synthesized path.
                 MainActor.assumeIsolated {
                     guard let self, self.isCurrentSubscription(installGen) else { return }
-                    Self.deliverAsynchronously(.didBecomeActive, at: Date(), to: handler)
+                    Self.deliverAsynchronously(
+                        .didBecomeActive, at: Date(), to: handler, through: deliveryChain,
+                        while: self, subscriptionGeneration: installGen
+                    )
                 }
             },
             center.addObserver(
@@ -61,7 +83,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 MainActor.assumeIsolated {
                     guard let self, self.isCurrentSubscription(installGen) else { return }
                     self.bumpActivationGeneration()
-                    Self.deliverWithBackgroundTime(.willResignActive, at: Date(), to: handler)
+                    Self.deliverWithBackgroundTime(
+                        .willResignActive, at: Date(), to: handler, through: deliveryChain,
+                        while: self, subscriptionGeneration: installGen
+                    )
                 }
             },
             center.addObserver(
@@ -72,7 +97,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
                 MainActor.assumeIsolated {
                     guard let self, self.isCurrentSubscription(installGen) else { return }
                     self.bumpActivationGeneration()
-                    Self.deliverWithBackgroundTime(.willTerminate, at: Date(), to: handler)
+                    Self.deliverWithBackgroundTime(
+                        .willTerminate, at: Date(), to: handler, through: deliveryChain,
+                        while: self, subscriptionGeneration: installGen
+                    )
                 }
             },
         ]
@@ -83,6 +111,7 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
             return previous
         }
         for token in previous { center.removeObserver(token) }
+        #endif
 
         // Cold-launch race: the OS can deliver didBecomeActive BEFORE this subscription
         // exists (the SDK actor subscribes asynchronously after start()). A notification
@@ -94,7 +123,7 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         // re-start() replaced the handler while the task was pending. The runtime's
         // activeSession == nil guard keeps a later OS duplicate benign.
         Task { @MainActor in
-            guard Self.sharedApplicationIfAvailable()?.applicationState == .active,
+            guard applicationIsActive(),
                   isCurrentSubscription(installGen) else { return }
             let captured = currentActivationGeneration()
             // No notification was posted for this one — that is why it is being synthesized — so
@@ -108,17 +137,14 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
             // the tail exists to prevent, on the path that only runs when a notification was
             // already missed. The generation re-check stays inside the ordered work, so a
             // resign/terminate that lands while this is queued still invalidates it.
-            Self.deliverInOrder { [weak self] in
+            deliveryChain.deliver { [weak self] in
                 guard let self,
-                      Self.sharedApplicationIfAvailable()?.applicationState == .active,
+                      self.applicationIsActive(),
                       self.currentActivationGeneration() == captured,
                       self.isCurrentSubscription(installGen) else { return }
                 await handler(.didBecomeActive, observedAt)
             }
         }
-        #else
-        _ = handler
-        #endif
     }
 
     @MainActor
@@ -131,38 +157,29 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
     }
 
     private func isCurrentSubscription(_ installGen: Int) -> Bool {
-        locked { subscriptionGeneration == installGen && !tokens.isEmpty }
+        // Observers become live one by one before the token array is published. Generation is the
+        // atomic subscription identity; requiring tokens to be non-empty dropped notifications in
+        // that installation window even though their closures belonged to the current start().
+        locked { subscriptionGeneration == installGen }
     }
 
     func stop() {
-        #if canImport(UIKit) && os(iOS)
+        installationLock.lock()
+        defer { installationLock.unlock() }
         let installed = locked {
             let installed = tokens
             tokens.removeAll()
             subscriptionGeneration &+= 1
             return installed
         }
-        // Drop the delivery chain with the subscription. The tail is process-wide, so a handler
-        // that never returns would otherwise block every lifecycle event after a restart too.
-        //
-        // HOP, do not assume. `stop()` is a plain protocol method and its only caller is
-        // `CoreRuntime.shutdown()`, which runs on the CoreRuntime ACTOR — not the main actor — so
-        // `MainActor.assumeIsolated` here would TRAP. The three sites above are safe because they
-        // are NotificationCenter callbacks delivered on `queue: .main`; this one has no such
-        // guarantee. It never crashed only because the whole `#if canImport(UIKit)` block has never
-        // been executable: compiled out on macOS, and uncompilable on iOS from 0a97ebc until the
-        // fix in this change. Making the block compile is exactly what would have made the trap
-        // reachable, so it is fixed in the same commit.
-        //
-        // Ordering still holds across a stop()/start() pair: this clear and the subsequent
-        // `deliverInOrder` are both main-actor work, so the main actor runs them in submission order.
-        Task { @MainActor in Self.deliveryTail = nil }
+        #if canImport(UIKit) && os(iOS)
         for token in installed { NotificationCenter.default.removeObserver(token) }
+        #else
+        _ = installed
         #endif
     }
 
-    #if canImport(UIKit) && os(iOS)
-    /// Tail of the serial delivery chain.
+    /// Tail of one subscription's serial delivery chain.
     ///
     /// Every lifecycle notification used to spawn its OWN unstructured Task, and unstructured
     /// Tasks carry no ordering guarantee between them. A resign and the activation that physically
@@ -171,35 +188,49 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
     /// until the next one arrived. Every observer here is registered on the main queue, so it
     /// already runs in post order: chaining each delivery onto the previous one is what carries
     /// that order across the actor boundary.
-    @MainActor
-    private static var deliveryTail: Task<Void, Never>?
+    private final class DeliveryChain: @unchecked Sendable {
+        @MainActor private var tail: Task<Void, Never>?
 
-    @MainActor
-    private static func deliverInOrder(_ work: @escaping @MainActor () async -> Void) {
-        let previous = deliveryTail
-        deliveryTail = Task { @MainActor in
-            await previous?.value
-            await work()
+        @MainActor
+        func deliver(_ work: @escaping @MainActor () async -> Void) {
+            let previous = tail
+            tail = Task { @MainActor in
+                await previous?.value
+                await work()
+            }
         }
     }
 
+    #if canImport(UIKit) && os(iOS)
     @MainActor
     private static func deliverAsynchronously(
         _ event: ApplicationLifecycleEvent,
         at occurredAt: Date,
-        to handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void
+        to handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void,
+        through deliveryChain: DeliveryChain,
+        while observer: ApplicationLifecycleObserver,
+        subscriptionGeneration installGen: Int
     ) {
-        deliverInOrder { await handler(event, occurredAt) }
+        deliveryChain.deliver { [weak observer] in
+            guard let observer, observer.isCurrentSubscription(installGen) else { return }
+            await handler(event, occurredAt)
+        }
     }
 
     @MainActor
     private static func deliverWithBackgroundTime(
         _ event: ApplicationLifecycleEvent,
         at occurredAt: Date,
-        to handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void
+        to handler: @escaping @Sendable (ApplicationLifecycleEvent, Date?) async -> Void,
+        through deliveryChain: DeliveryChain,
+        while observer: ApplicationLifecycleObserver,
+        subscriptionGeneration installGen: Int
     ) {
         guard let application = sharedApplicationIfAvailable() else {
-            deliverInOrder { await handler(event, occurredAt) }
+            deliveryChain.deliver { [weak observer] in
+                guard let observer, observer.isCurrentSubscription(installGen) else { return }
+                await handler(event, occurredAt)
+            }
             return
         }
         let name: String
@@ -215,12 +246,13 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
             application: application,
             name: name
         )
-        deliverInOrder {
+        deliveryChain.deliver { [weak observer] in
+            defer { backgroundTask.end() }
+            guard let observer, observer.isCurrentSubscription(installGen) else { return }
             // The lifecycle handler does not finish until the session_end envelope has
             // crossed the actor boundary and reached durable SDK storage. The UIKit
             // notification itself stays nonblocking on the main thread.
             await handler(event, occurredAt)
-            backgroundTask.end()
         }
     }
 
@@ -236,10 +268,28 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
 
         static func start(application: UIApplication, name: String) -> BackgroundTaskLease {
             let lease = BackgroundTaskLease(application: application)
-            lease.identifier = application.beginBackgroundTask(withName: name) { [weak lease] in
-                Task { @MainActor in lease?.end() }
+            // UIApplication.h declares this block `NS_SWIFT_UI_ACTOR`, so it is already isolated to
+            // the main actor and the system runs it synchronously on the main thread. The task has
+            // to be ENDED before the handler returns; a `Task { @MainActor in ... }` hop returns
+            // first and ends the task on a later main-actor turn, which is exactly the window in
+            // which the system terminates the app for not having ended it.
+            let identifier = application.beginBackgroundTask(withName: name) { [weak lease] in
+                lease?.end()
             }
+            lease.adopt(identifier)
             return lease
+        }
+
+        /// `beginBackgroundTask` can only hand back its identifier once the handler is installed, so
+        /// a handler that fires before it returns finds `.invalid` and marks the lease ended. Ending
+        /// the identifier here rather than dropping it keeps that ordering from leaking a background
+        /// task the app then has no way to end.
+        private func adopt(_ identifier: UIBackgroundTaskIdentifier) {
+            guard !ended else {
+                if identifier != .invalid { application.endBackgroundTask(identifier) }
+                return
+            }
+            self.identifier = identifier
         }
 
         func end() {
@@ -263,6 +313,15 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
         return unmanaged.takeUnretainedValue() as? UIApplication
     }
     #endif
+
+    @MainActor
+    private static func defaultApplicationIsActive() -> Bool {
+        #if canImport(UIKit) && os(iOS)
+        return sharedApplicationIfAvailable()?.applicationState == .active
+        #else
+        return false
+        #endif
+    }
 
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
