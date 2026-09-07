@@ -384,22 +384,59 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertEqual(identityAfterSecondRecovery.installEpochID, recoveredIdentity.installEpochID)
     }
 
-    func testCorruptPendingRevocationIsReportedAndRetained() async throws {
+    /// Retaining the corrupt record and rethrowing -- what this case asserted until the durable
+    /// consent defect was measured -- was unreachable as a signal and permanent as a fault: every
+    /// caller reads the record through `try?`, so the throw was only ever logged, and the retained
+    /// blob reproduced it on every later launch.
+    func testCorruptPendingRevocationStillCompletesTheRevocation() async throws {
         let defaults = makeSuite("AttriKitCorruptPendingRevocation")
-        let corruptRecord = Data("not a pending revocation".utf8)
-        defaults.set(corruptRecord, forKey: "io.attrikit.pending-revocation")
-        let storage = SDKStorage(
-            defaults: .init(value: defaults),
-            keychain: MemoryKeychain(),
-            directory: makeTemporaryDirectory()
-        )
+        let keychain = MemoryKeychain()
+        let directory = makeTemporaryDirectory()
+        let storage = SDKStorage(defaults: .init(value: defaults), keychain: keychain, directory: directory)
+        let originalIdentity = try await storage.initializeIdentities()
+        defaults.set(Data("not a pending revocation".utf8), forKey: "io.attrikit.pending-revocation")
 
-        do {
-            try await storage.recoverPendingRevocationIfNeeded()
-            XCTFail("a corrupt pending revocation must not be treated as absent")
-        } catch {
-            XCTAssertEqual(defaults.data(forKey: "io.attrikit.pending-revocation"), corruptRecord)
-        }
+        try await storage.recoverPendingRevocationIfNeeded()
+
+        let recovered = try await storage.initializeIdentities()
+        let consentAfterRecovery = await storage.storedConsent()
+        XCTAssertEqual(consentAfterRecovery, .revoked)
+        XCTAssertNotEqual(recovered.installEpochID, originalIdentity.installEpochID)
+        XCTAssertEqual(recovered.installationID, originalIdentity.installationID)
+        XCTAssertNil(defaults.data(forKey: "io.attrikit.pending-revocation"))
+    }
+
+    /// The revocation the user actually performs, over a store whose pending-revocation key is
+    /// unreadable. Both writes of the durable consent sit behind that read -- the
+    /// `beginRevocationTransition()` branch of `setConsent` writes nothing itself, and
+    /// `finishRevocationTransition()` reaches `storeConsent(.revoked)` only past its own
+    /// `pendingRevocation()` -- so a throw there left the record saying `measurementGranted` and
+    /// the next launch read it back.
+    func testRevocationPersistsAcrossRelaunchWithAnUnreadablePendingRecord() async throws {
+        let defaults = makeSuite("AttriKitCorruptPendingRevocationRuntime")
+        let keychain = MemoryKeychain()
+        let directory = makeTemporaryDirectory()
+        let storage = SDKStorage(defaults: .init(value: defaults), keychain: keychain, directory: directory)
+        let runtime = makeRuntime(storage: storage, transport: acceptingEventTransport())
+        let originalIdentity = try await storage.initializeIdentities()
+        defaults.set(Data("not a pending revocation".utf8), forKey: "io.attrikit.pending-revocation")
+
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+        await runtime.setConsent(.revoked)
+        let consentAfterRevoke = await storage.storedConsent()
+        XCTAssertEqual(consentAfterRevoke, .revoked)
+        await runtime.shutdown()
+
+        let relaunchedStorage = SDKStorage(
+            defaults: .init(value: defaults),
+            keychain: keychain,
+            directory: directory
+        )
+        try await relaunchedStorage.recoverPendingRevocationIfNeeded()
+        let consentAfterRelaunch = await relaunchedStorage.storedConsent()
+        XCTAssertEqual(consentAfterRelaunch, .revoked)
+        let afterRelaunch = try await relaunchedStorage.initializeIdentities()
+        XCTAssertNotEqual(afterRelaunch.installEpochID, originalIdentity.installEpochID)
     }
 
     func testPendingBatchIDMembershipAndSentAtPersistAcrossRelaunch() async throws {
@@ -1002,6 +1039,48 @@ final class RuntimeHardeningTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    /// A withdrawal left on disk by an earlier launch must still be deliverable after consent is
+    /// re-granted. `scheduleConsentReceiptDrain` gated withdrawals on `consent == .denied ||
+    /// consent == .revoked` only, while the drain itself (`deliverWithdrawals`) also accepts
+    /// `consent.allowsMeasurement`, so between a re-grant and first-open registration no drain was
+    /// ever scheduled and the receipt the drain would have sent stayed queued.
+    func testForegroundDrainsQueuedWithdrawalAfterRegrantBeforeFirstOpenRegisters() async throws {
+        let storage = makeStorage(label: "RegrantWithdrawalDrain")
+        let identity = try await storage.initializeIdentities()
+        try await storage.enqueueConsentReceipt(StoredConsentReceipt(
+            idempotencyKey: UUID(),
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            scope: "measurement",
+            state: .revoked,
+            occurredAt: Date(timeIntervalSince1970: 1_700_000_000)
+        ))
+        let observation = ConsentReceiptObservation()
+        let transport = StubTransport { request, _ in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/v1/ingest/consent") {
+                let body = try gunzipStored(XCTUnwrap(request.httpBody))
+                await observation.record(body: body, identity: identity)
+                return successResult(status: 200, body: #"{"status":"accepted"}"#)
+            }
+            // first-open never registers, so firstOpenRegistered stays false for the whole test.
+            return successResult(status: 500, body: #"{"error":"unavailable"}"#)
+        }
+        let runtime = makeRuntime(storage: storage, transport: transport)
+
+        await runtime.start(apiKey: apiKey, consent: .unknown)
+        await runtime.setConsent(.measurementGranted)
+        await runtime.applicationDidBecomeActive()
+
+        let delivered = await waitUntil { await observation.states == [.revoked] }
+        XCTAssertTrue(delivered, "a queued withdrawal must be drained after a re-grant even before first-open registers")
+        let queueDrained = await waitUntil {
+            (try? await storage.pendingConsentReceipts().isEmpty) == true
+        }
+        XCTAssertTrue(queueDrained, "the acknowledged withdrawal must leave the durable queue")
+        await runtime.shutdown()
+    }
+
     func testGrantReceiptStaysGatedWhileWithdrawalBypassesItWhenConsentIsOff() async throws {
         let storage = makeStorage(label: "ConsentReceiptKinds")
         let identity = try await storage.initializeIdentities()
@@ -1088,6 +1167,37 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertNil(next)
         XCTAssertTrue(pending.isEmpty)
         XCTAssertNil(defaults.data(forKey: "io.attrikit.consent-receipts"))
+    }
+
+    func testWithdrawalAcknowledgementSupersedesEqualTimestampEarlierGrant() async throws {
+        let storage = makeStorage(label: "EqualTimestampEarlierGrant")
+        let identity = try await storage.initializeIdentities()
+        // Receipts round-trip through iso8601WithFractionalSeconds, so a grant and the withdrawal
+        // that followed it inside one millisecond come back carrying the SAME occurredAt.
+        let occurredAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let grant = StoredConsentReceipt(
+            idempotencyKey: UUID(),
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            scope: "measurement",
+            state: .measurementGranted,
+            occurredAt: occurredAt
+        )
+        let withdrawal = StoredConsentReceipt(
+            idempotencyKey: UUID(),
+            installationID: identity.installationID,
+            installEpochID: identity.installEpochID,
+            scope: "measurement",
+            state: .revoked,
+            occurredAt: occurredAt
+        )
+        try await storage.enqueueConsentReceipt(grant)
+        try await storage.enqueueConsentReceipt(withdrawal)
+
+        try await storage.acknowledgeConsentReceipt(idempotencyKey: withdrawal.idempotencyKey)
+        let pending = try await storage.pendingConsentReceipts()
+
+        XCTAssertEqual(pending, [], "the acknowledged withdrawal must supersede the grant it followed")
     }
 
     func testWithdrawalAcknowledgementPreservesEqualTimestampRegrant() async throws {
@@ -1799,9 +1909,22 @@ final class RuntimeHardeningTests: XCTestCase {
             "the batch is the leading run of the queue, in order"
         )
         let measuredBatchSize = try encodedBatchSize(batchID: batch.batchID, events: batch.events)
+        // This used to compare `measuredBatchSize` to its own defining expression, so it could not
+        // fail and its message asserted nothing: no part of the test had ever seen the bytes the
+        // runtime puts on the wire. Flush this same storage through a runtime instead. The pending
+        // batch was recorded by the `nextEventBatch` above, so the flush re-reads that exact batch
+        // and its request body IS the payload measured here, once the transport's gzip is undone.
+        let transport = StubTransport { _, _ in successResult() }
+        let runtime = makeRuntime(storage: storage, transport: transport)
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+        let flushed = await waitForBatchRequest(in: transport)
+        XCTAssertTrue(flushed, "precondition: the runtime must transmit the pending batch")
+        let sentRequests = await eventBatchRequests(in: transport)
+        let sentBody = try gunzipStored(XCTUnwrap(sentRequests.first?.httpBody))
+        await runtime.shutdown()
         XCTAssertEqual(
+            sentBody.count,
             measuredBatchSize,
-            try attriKitJSONEncoder().encode(EventBatch(batchID: batch.batchID, events: batch.events)).count,
             "the ceiling assertion must measure the exact payload sent by the runtime"
         )
         XCTAssertLessThanOrEqual(
@@ -1818,8 +1941,123 @@ final class RuntimeHardeningTests: XCTestCase {
         )
     }
 
+    // The cut must be measured against the payload that is SENT, batch identifier included.
+    // `nextEventBatch` stamps every batch with a 36-character lowercased UUID, so a prefix that
+    // lands inside the last 36 bytes below the ceiling fits only while the identifier is missing
+    // from the measurement, and is then sent over the ceiling the cut exists to hold.
+    func testTheBatchCeilingCountsTheBatchIdentifierItWillSend() async throws {
+        let storage = makeStorage(label: "BatchCeilingIdentifier")
+        let identity = try await storage.initializeIdentities()
+        let block = String(repeating: "p", count: 4_000)
+        var events = (0..<12).map { index in
+            makeEvent(
+                name: "pad_\(String(format: "%02d", index))",
+                identity: identity,
+                properties: ["pad": .string(block)]
+            )
+        }
+        // One more event, padded to the byte, so the queue encodes to EXACTLY the ceiling with an
+        // empty batch identifier: every padding character is one JSON byte, and every other field
+        // of an envelope is fixed width (lowercased UUIDs, ISO-8601 timestamps with 3 fractional
+        // digits), so the tuned event is the probe's size plus the padding.
+        let probe = makeEvent(name: "tune", identity: identity, properties: ["pad": .string("")])
+        let slack = try SDKStorage.batchByteCeiling - encodedBatchSize(batchID: "", events: events + [probe])
+        XCTAssertGreaterThan(slack, 0, "precondition: 12 padded events must leave room for the tuned one")
+        events.append(makeEvent(
+            name: "tune",
+            identity: identity,
+            properties: ["pad": .string(String(repeating: "p", count: slack))]
+        ))
+        XCTAssertEqual(
+            try encodedBatchSize(batchID: "", events: events),
+            SDKStorage.batchByteCeiling,
+            "precondition: the queue sits exactly on the ceiling when the identifier is not counted"
+        )
+        for event in events { try await storage.enqueue(event) }
+
+        let batchValue = try await storage.nextEventBatch()
+        let batch = try XCTUnwrap(batchValue)
+
+        XCTAssertLessThanOrEqual(
+            try encodedBatchSize(batchID: batch.batchID, events: batch.events),
+            SDKStorage.batchByteCeiling,
+            "the payload that is sent, batch identifier included, must fit under the ceiling"
+        )
+        XCTAssertEqual(
+            batch.events.count, events.count - 1,
+            "the event that fits only while the identifier is uncounted stays for the next batch"
+        )
+    }
+
     private func encodedBatchSize(batchID: String, events: [EventEnvelope]) throws -> Int {
         try attriKitJSONEncoder().encode(EventBatch(batchID: batchID, events: events)).count
+    }
+
+    /// The attribution ETag was stored BEFORE the 200 body was decoded, and the decode failure was
+    /// swallowed by `catch {}`. The validator for a payload that was never applied then earned a
+    /// 304 on the next poll, which falls to `default: break`, so the cache stayed nil for the rest
+    /// of the session and attribution(timeout:) answered .timedOut against a server with a match.
+    ///
+    /// MUTATION PIN: moving `if let etag = response.headers["etag"] { attributionETag = etag }`
+    /// back above the `switch` makes the second poll conditional and this case times out.
+    func testAnETagIsNotRetainedForAnAttributionBodyThatFailedToDecode() async throws {
+        let getCounter = PollCounter()
+        let transport = StubTransport { request, _ in
+            guard request.httpMethod == "GET" else {
+                return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+            }
+            if request.value(forHTTPHeaderField: "If-None-Match") != nil {
+                return successResult(status: 304, body: "")
+            }
+            if getCounter.next() == 1 {
+                // Not decodable as AttributionResponse (every field is optional, so it has to be
+                // a TYPE mismatch rather than a missing key), which is what makes case 200 throw.
+                return successResult(body: #"{"policy_version":"not-a-number"}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(
+                body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c7","finality":"provisional","policy_version":1,"version":1}"#
+            )
+        }
+        let runtime = makeRuntime(storage: makeStorage(label: "AttributionETag"), transport: transport)
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        let result = await runtime.attribution(timeout: .seconds(5))
+        guard case .attributed(let attribution) = result else {
+            return XCTFail("a 200 whose body failed to decode must not keep its ETag: \(result)")
+        }
+        XCTAssertEqual(attribution.campaignID, "c7")
+        await runtime.shutdown()
+    }
+
+    /// A REFUSED user id is not a logout. `setUserID` mapped an empty / >256-byte / "@"-carrying
+    /// value to nil and PERSISTED that nil, so one bad call erased the RevenueCat join key that a
+    /// good earlier call had stored and re-submitted identify with no user at all.
+    ///
+    /// MUTATION PIN: weakening the refusal guard to `if false, sanitized == nil` restores the
+    /// erasure and fails the second assertion. The first assertion is the control: without it a
+    /// build that never persists anything would satisfy the second.
+    func testARefusedUserIDDoesNotEraseTheOneAlreadyJoined() async throws {
+        let transport = StubTransport { _, _ in successResult() }
+        let storage = makeStorage(label: "RefusedUserID")
+        let runtime = makeRuntime(storage: storage, transport: transport)
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        await runtime.setUserID("rc-app-user-id")
+        let persisted = await waitUntil { await storage.storedUserID() == "rc-app-user-id" }
+        XCTAssertTrue(persisted, "control: a valid id must be persisted")
+
+        await runtime.setUserID("someone@example.com")
+        let afterRefusal = await storage.storedUserID()
+        XCTAssertEqual(
+            afterRefusal,
+            "rc-app-user-id",
+            "an id refused by validation must leave the stored join key untouched"
+        )
+
+        await runtime.setUserID(nil)
+        let afterExplicitClear = await storage.storedUserID()
+        XCTAssertNil(afterExplicitClear, "an explicit nil must still clear the stored id")
+        await runtime.shutdown()
     }
 
     private func makeRuntime(
@@ -2054,7 +2292,11 @@ private actor SuspendedFirstBatchTransport: HTTPTransport {
 
     private func armDeadline() {
         deadline = Task {
-            try? await Task.sleep(for: suspendedStubDeadline)
+            // A cancelled deadline must NOT fire. `try?` swallowed the CancellationError that
+            // releaseBatch()'s cancel() raises out of the sleep, so the stale task ran on to
+            // failStalledBatch() and, when a second send had already re-armed the stub, resumed the
+            // NEW continuation with a stall it never had.
+            do { try await Task.sleep(for: suspendedStubDeadline) } catch { return }
             self.failStalledBatch()
         }
     }
@@ -2295,5 +2537,19 @@ private extension Array where Element: Hashable {
     func uniqued() -> [Element] {
         var seen: Set<Element> = []
         return filter { seen.insert($0).inserted }
+    }
+}
+
+/// Counts the attribution polls a stub has answered, so one responder can serve a different body
+/// to the first GET than to the rest.
+private final class PollCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
     }
 }

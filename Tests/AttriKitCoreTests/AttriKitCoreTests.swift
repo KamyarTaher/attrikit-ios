@@ -63,8 +63,10 @@ private static func liveEndpoint() -> URL {
            let url = URL(string: raw), url.scheme == "https" {
             return url
         }
-        // No valid endpoint: attribution is impossible for this process. Fail loudly so the
-        // misconfiguration surfaces instead of silently sending to a reserved .invalid host.
+        // No valid endpoint: attribution is impossible for this process. Fail loudly — os_log(.fault)
+        // plus a DEBUG trap — and then return the reserved .invalid host, so every request fails
+        // fast instead of silently reaching a wrong server. The caller still has to survive a URL
+        // that never resolves; this path does not throw or abort in a shipping build.
         #if canImport(os)
         os_log(
             .fault,
@@ -779,6 +781,49 @@ private static func liveEndpoint() -> URL {
         XCTAssertEqual(result, .timedOut)
     }
 
+    func testRejectedProtectedEnqueueKeepsTheEventsItsEvictionLoopRemoved() async throws {
+        let storage = SDKStorage(
+            defaults: .init(value: UserDefaults(suiteName: "AttriKitRollback.\(UUID())")!),
+            keychain: MemoryKeychain(),
+            directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            maxEvents: 100,
+            maxBytes: 2_600
+        )
+        let identity = try await storage.initializeIdentities()
+        func event(_ name: String, payload: Int) -> EventEnvelope {
+            EventEnvelope(
+                eventID: UUID(),
+                eventName: name,
+                eventVersion: 1,
+                occurredAt: Date(),
+                sentAt: Date(),
+                installationID: identity.installationID,
+                installEpochID: identity.installEpochID,
+                sessionID: UUID(),
+                consent: EventConsent(measurement: "granted", tracking: "denied", policyVersion: 1),
+                properties: payload > 0 ? ["payload": .string(String(repeating: "x", count: payload))] : [:]
+            )
+        }
+        let ordinary = event("view", payload: 0)
+        let purchase = event("purchase", payload: 900)
+        try await storage.enqueue(ordinary)
+        try await storage.enqueue(purchase)
+        let before = try await storage.queuedEvents().map(\.eventID)
+        XCTAssertEqual(before, [ordinary.eventID, purchase.eventID], "precondition: both events fit")
+
+        do {
+            try await storage.enqueue(event("purchase", payload: 900))
+            XCTFail("Expected protected-event capacity failure")
+        } catch StorageError.queueFullForProtectedEvent {}
+
+        let after = try await storage.queuedEvents().map(\.eventID)
+        XCTAssertEqual(
+            after,
+            [ordinary.eventID, purchase.eventID],
+            "an enqueue that reports failure must not persist the events its eviction loop removed"
+        )
+    }
+
     func testQueueCapsFIFOAndNeverEvictsProtectedRevenueEvents() async throws {
         let defaults = UserDefaults(suiteName: "AttriKitQueue.\(UUID())")!
         let storage = SDKStorage(defaults: .init(value: defaults), keychain: MemoryKeychain(), directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), maxEvents: 2, maxBytes: 1_048_576)
@@ -1233,5 +1278,96 @@ extension AttriKitCoreTests {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertNil(json["idfa"], "identify must not ship idfa after downgrade")
         XCTAssertEqual(json["idfv"] as? String, idfv.uuidString.lowercased())
+    }
+
+    /// The envelope read `consent` twice across the platform-evidence suspension: once at
+    /// `ConsentPayload(state:)` before it, and once at the `idfa` gate after it. An ATT grant that
+    /// lands inside that window therefore produced a body DECLARING `measurement_granted` while
+    /// CARRYING an IDFA -- the one shape `firstOpenEnvelopeSchema` refuses with a 422, so the
+    /// first-open is permanently lost -- and that same body was then cached in
+    /// `selectedFirstOpenBody` and persisted under the new consent, so every later attempt
+    /// replayed it. The window is deterministic here: the runtime actor is held from the first
+    /// envelope field through the suspension, so a `setConsent` requested after `coarseContext()`
+    /// (the last synchronous call before it) cannot run until the envelope is parked.
+    func testFirstOpenEnvelopeDeclaresTheConsentThatGatedItsIdfa() async throws {
+        let idfa = UUID(uuidString: "12121212-1212-4121-8121-121212121212")!
+        let evidence = ConsentWindowEvidence()
+        let transport = StubTransport { _, _ in successResult() }
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport,
+            evidence: evidence,
+            deviceEvidence: DeviceEvidence(idfa: idfa, idfv: nil)
+        ))
+        await runtime.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let parked = await waitUntil { evidence.envelopeReachedEvidenceSuspension }
+        XCTAssertTrue(parked, "precondition: the envelope must be building and parked on evidence")
+        await runtime.setConsent(.trackingGranted)
+        evidence.release()
+
+        let sent = await waitUntil {
+            await transport.requests().contains { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+        }
+        XCTAssertTrue(sent, "precondition: the assertion needs a first-open body")
+        await runtime.shutdown()
+
+        let candidate = await transport.requests().first {
+            $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+        }
+        let request = try XCTUnwrap(candidate)
+        let body = try gunzipStored(XCTUnwrap(request.httpBody))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let declared = (json["consent"] as? [String: Any])?["state"] as? String
+        XCTAssertEqual(
+            json["idfa"] as? String,
+            idfa.uuidString.lowercased(),
+            "the grant was in force when the identifiers were read, so the idfa belongs in the body"
+        )
+        XCTAssertEqual(
+            declared,
+            "tracking_granted",
+            "the envelope declared a consent that forbids the idfa it carries: a 422 on the wire, then cached and replayed"
+        )
+    }
+}
+
+/// Evidence that parks `appTransactionJWS` until released, and reports when `coarseContext()` --
+/// the last synchronous call the first-open envelope makes before that suspension -- has run.
+final class ConsentWindowEvidence: PlatformEvidenceProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var contextReads = 0
+
+    func appTransactionJWS() async -> String? {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            continuations.append(continuation)
+            lock.unlock()
+        }
+        return nil
+    }
+
+    func adServicesToken() async -> String? { nil }
+
+    func coarseContext() -> CoarseContext {
+        lock.lock()
+        contextReads += 1
+        lock.unlock()
+        return CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
+    }
+
+    func appVersion() -> String { "1.2.3 (42)" }
+
+    var envelopeReachedEvidenceSuspension: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return contextReads > 0
+    }
+
+    func release() {
+        lock.lock()
+        let pending = continuations
+        continuations.removeAll()
+        lock.unlock()
+        for continuation in pending { continuation.resume() }
     }
 }

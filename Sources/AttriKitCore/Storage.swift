@@ -518,13 +518,25 @@ actor SDKStorage {
             // A withdrawal may bypass an older grant while consent is off. Once the server has
             // acknowledged that withdrawal, sending the stale grant on a future regrant would
             // restore processing for the old epoch. Remove only grants the withdrawal supersedes.
-            receipts.removeAll { receipt in
-                receipt.idempotencyKey == idempotencyKey
-                    || (receipt.kind == .grant
-                        && receipt.installationID == acknowledged.installationID
-                        && receipt.installEpochID == acknowledged.installEpochID
-                        && receipt.occurredAt < acknowledged.occurredAt)
-            }
+            //
+            // "Older" is QUEUE POSITION, not the timestamp. `occurredAt` round-trips through
+            // `attriKitJSONEncoder` as iso8601WithFractionalSeconds, so it comes back at
+            // MILLISECOND resolution: a grant and the withdrawal that followed it inside one
+            // millisecond read back EQUAL, `occurredAt <` was then false, and the superseded
+            // grant stayed queued to be delivered on the next regrant. Receipts are only ever
+            // appended, so an index below the acknowledged one happened before it whatever the
+            // clock did -- and a regrant enqueued AFTER the withdrawal still survives, which is
+            // what testWithdrawalAcknowledgementPreservesEqualTimestampRegrant pins.
+            receipts = receipts.enumerated().filter { entry in
+                if entry.offset == index { return false }
+                if entry.offset < index,
+                   entry.element.kind == .grant,
+                   entry.element.installationID == acknowledged.installationID,
+                   entry.element.installEpochID == acknowledged.installEpochID {
+                    return false
+                }
+                return true
+            }.map(\.element)
         } else {
             receipts.remove(at: index)
         }
@@ -585,14 +597,19 @@ actor SDKStorage {
         // NSFileProtectionCompleteUntilFirstUserAuthentication, so a background launch before first
         // unlock cannot read it. Dropping one event there is recoverable; dropping the queue is not.
         //
-        // nextEventBatch below already calls `try readQueue()`, so this matches the file's own
-        // convention. queuedEvents keeps its `try?` deliberately: it writes back only when the
-        // event count changed, which the empty fallback cannot trigger, so it loses nothing.
+        // nextEventBatch and queuedEvents below both call `try readQueue()`, so this matches the
+        // file's own convention: no reader of the queue answers "empty" for a file it could not
+        // read. queuedEvents still kept a `try?` when this comment was first written; it lost it
+        // in the same change that added testQueuedEventsReportsAnUnreadableQueueFile, and this
+        // paragraph went on describing the fallback for a month after it was gone.
         var queue = try readQueue()
         let pendingEventIDs = Set(queue.pendingBatch?.eventIDs ?? [])
         queue.events.removeAll {
             !pendingEventIDs.contains($0.eventID) && now.timeIntervalSince($0.occurredAt) > maxAge
         }
+        // What to fall back to if this enqueue turns out to be impossible: the queue as read and
+        // age-purged, WITHOUT this event and without any eviction the loop below performs.
+        let queueWithoutEvent = queue
         queue.events.append(event)
 
         var evicted = 0
@@ -601,8 +618,13 @@ actor SDKStorage {
                 !pendingEventIDs.contains($0.eventID) && !isProtected($0)
             }) else {
                 if event.eventID == queue.events.last?.eventID {
-                    queue.events.removeLast()
-                    try writeQueue(queue)
+                    // This enqueue fails, so its cost is rolled back too. Persisting `queue` here
+                    // committed the events earlier iterations had already evicted TO MAKE ROOM FOR
+                    // THIS EVENT, so a caller told "nothing was stored" had in fact permanently
+                    // lost unrelated unsent events for an event that was never kept.
+                    // `queueWithoutEvent` was within both caps before the append, so writing it
+                    // back cannot leave the queue over capacity.
+                    try writeQueue(queueWithoutEvent)
                     throw StorageError.queueFullForProtectedEvent
                 }
                 break
@@ -767,7 +789,24 @@ actor SDKStorage {
 
     private func pendingRevocation() throws -> PendingRevocation? {
         guard let data = defaultsBox.value.data(forKey: Key.pendingRevocation) else { return nil }
-        return try attriKitJSONDecoder().decode(PendingRevocation.self, from: data)
+        do {
+            return try attriKitJSONDecoder().decode(PendingRevocation.self, from: data)
+        } catch {
+            // Throwing here pinned durable consent at the pre-revocation value FOREVER. Every
+            // caller of this record is reached through `try?` -- `beginRevocationTransition()` at
+            // CoreRuntime.setConsent, `finishRevocationTransition()` inside stopAndWipe, and
+            // `recoverPendingRevocationIfNeeded()` at start -- so an undecodable blob made all
+            // three no-ops, `storeConsent(.revoked)` never ran, and nothing ever cleared the key,
+            // which repeated the failure on every later launch.
+            //
+            // Reading the blob as "no transition in flight" would be just as wrong: it records
+            // that a revocation was BEGUN and never finished. So recover the fact and mint a new
+            // target epoch. Nothing is lost by doing so: `targetInstallEpochID` is a UUID this
+            // process minted moments earlier and never published, so any fresh one satisfies the
+            // requirement it exists for -- that the revoked install stops sharing a lineage with
+            // the epoch it had before.
+            return PendingRevocation(targetInstallEpochID: UUID())
+        }
     }
 
     private func consentReceipts() throws -> [StoredConsentReceipt] {
@@ -853,8 +892,17 @@ actor SDKStorage {
         return fits
     }
 
+    /// Stands in for the identifier `nextEventBatch` will stamp on the batch: a lowercased
+    /// `UUID().uuidString` is 36 characters whichever UUID it is, so a fixed one measures the
+    /// real payload exactly while keeping the measurement deterministic.
+    ///
+    /// Measuring `""` instead understated every batch by those 36 bytes, so a prefix landing in
+    /// the last 36 bytes below the ceiling was cut IN and then sent over the ceiling that exists
+    /// to hold it.
+    private static let batchIDSizeProbe = "00000000-0000-0000-0000-000000000000"
+
     private static func encodedBatchSize(_ events: [EventEnvelope]) -> Int {
-        (try? attriKitJSONEncoder().encode(EventBatch(batchID: "", events: events)).count) ?? .max
+        (try? attriKitJSONEncoder().encode(EventBatch(batchID: batchIDSizeProbe, events: events)).count) ?? .max
     }
 
     private func readQueue() throws -> QueueFile {

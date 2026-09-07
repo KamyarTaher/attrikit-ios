@@ -922,6 +922,42 @@ final class SessionTrackingTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    /// The clamp on `duration_ms` used `min(Double(Int.max), ...)`. `Double(Int.max)` rounds UP to
+    /// 2^63, which is not an Int, so a value that reached the clamp made `Int(_:)` TRAP and took
+    /// the host app down — the clamp crashed on exactly the input it was written to survive.
+    ///
+    /// MUTATION PIN: restoring `let durationMilliseconds = Int(min(Double(Int.max), roundedMilliseconds))`
+    /// aborts this case with a fatal error; `?? 0` fails the equality below.
+    func testAnAbsurdSessionDurationClampsInsteadOfTrappingTheHostApp() async throws {
+        let clock = TestDateClock()
+        let lifecycle = ManualLifecycleObserver()
+        let transport = sessionTransport()
+        let runtime = CoreRuntime(configuration: makeTestConfiguration(
+            transport: transport,
+            now: { clock.now() },
+            lifecycle: lifecycle
+        ))
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        let foregroundedAt = clock.now()
+        await runtime.applicationDidBecomeActive(occurredAt: foregroundedAt)
+        // 1e16 seconds of "elapsed" is what a corrupted or wildly skewed startedAt looks like:
+        // elapsed * 1_000 is larger than 2^63, so it lands on the clamp.
+        let backgroundedAt = foregroundedAt.addingTimeInterval(1.0e16)
+        await runtime.applicationWillResignActive(occurredAt: backgroundedAt)
+
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the session must still be emitted rather than crashing the app")
+        let events = await sessionEvents(in: transport)
+        let properties = try XCTUnwrap(events.first?["properties"] as? [String: Any])
+        XCTAssertEqual(
+            (properties["duration_ms"] as? NSNumber)?.doubleValue,
+            Double(Int.max),
+            "an unrepresentable duration must clamp to Int.max"
+        )
+        await runtime.shutdown()
+    }
+
     private func sessionTransport() -> StubTransport {
         StubTransport { request, _ in
             if request.url?.path.contains("events:batch") == true {

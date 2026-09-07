@@ -149,7 +149,10 @@ final class ApplicationLifecycleObserver: ApplicationLifecycleObserving, @unchec
 
     @MainActor
     private func bumpActivationGeneration() {
-        activationGeneration &+= 1
+        // Under the same lock currentActivationGeneration() reads through: the bump runs on the
+        // main actor, the re-check runs inside the ordered delivery tail on whatever executor
+        // carries it, and an unlocked write against a locked read is a data race on a plain Int.
+        locked { activationGeneration &+= 1 }
     }
 
     private func currentActivationGeneration() -> Int {

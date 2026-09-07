@@ -89,8 +89,10 @@ struct AttriKitTestingConfiguration: Sendable {
            let url = URL(string: raw), url.scheme == "https" {
             return url
         }
-        // No valid endpoint: attribution is impossible for this process. Fail loudly so the
-        // misconfiguration surfaces instead of silently sending to a reserved .invalid host.
+        // No valid endpoint: attribution is impossible for this process. Fail loudly — os_log(.fault)
+        // plus a DEBUG trap — and then return the reserved .invalid host, so every request fails
+        // fast instead of silently reaching a wrong server. The caller still has to survive a URL
+        // that never resolves; this path does not throw or abort in a shipping build.
         #if canImport(os)
         os_log(
             .fault,
@@ -389,9 +391,12 @@ actor CoreRuntime {
             // The integrator sees nothing arrive and has no way to learn why; during an integration
             // that is indistinguishable from a broken SDK.
             //
-            // The rejected KEY is named because that is what the caller must change. The VALUE is
-            // never logged: this guard exists precisely because a value may be an email or a phone
-            // number, and a log line is not a safe place to put one.
+            // Every KEY on the refused event is named, because that is what the caller must
+            // change. It is not narrowed to the offending one: `validateProperties` throws a bare
+            // `AttriKitError.invalidProperty` carrying no key, and giving that case an associated
+            // value is a public-API change. The VALUE is never logged: this guard exists precisely
+            // because a value may be an email or a phone number, and a log line is not a safe
+            // place to put one.
             //
             // Note the guard is a SUBSTRING match on email|e-mail|phone|mobile|address|name, so
             // ordinary analytics keys like product_name, campaign_name and mobile_os are refused
@@ -580,10 +585,14 @@ actor CoreRuntime {
         lastSessionIndex = activeSession.index
 
         let elapsed = max(0, endedAt.timeIntervalSince(activeSession.startedAt))
-        let roundedMilliseconds = min(Double(Int.max), (elapsed * 1_000).rounded())
+        let roundedMilliseconds = (elapsed * 1_000).rounded()
         guard roundedMilliseconds.isFinite,
               let event = try? AttriKitEvent("session_end", version: 1) else { return }
-        let durationMilliseconds = Int(roundedMilliseconds)
+        // The clamp used to be `min(Double(Int.max), ...)`. `Double(Int.max)` rounds UP to 2^63,
+        // which is NOT representable as an Int, so any value that actually reached the clamp
+        // produced exactly 2^63 and the conversion below TRAPPED — the clamp crashed the host app
+        // on the one input it existed to survive. Converting through `Int(exactly:)` clamps.
+        let durationMilliseconds = Int(exactly: roundedMilliseconds) ?? Int.max
         await enqueue(
             event,
             properties: [
@@ -636,10 +645,11 @@ actor CoreRuntime {
         // (apps/link/src/ingestion/repository.ts:421).
         guard await configuration.storage.isExactTokenNew(token) else { return .ignored }
         exactToken = ExactTokenReference(token: token, kind: kind, clipboardOptIn: kind == "clipboard" ? true : nil)
-        // The token was marked consumed on disk a line above, BEFORE the call that delivers it, so
-        // any failure here burned the only deterministic attribution signal the SDK has and
-        // downgraded the install to probabilistic matching with nothing to show for it. Release it
-        // when the identify was not acknowledged, so a later attempt can carry it.
+        // Nothing is consumed on disk yet: the guard above only CHECKED the token. It used to be
+        // marked consumed here, BEFORE the call that delivers it, so any failure below burned the
+        // only deterministic attribution signal the SDK has and downgraded the install to
+        // probabilistic matching with nothing to show for it. The mark now lands in submitIdentify,
+        // once the identify carrying the token is acknowledged, and is released when it is not.
         //
         // `exactToken` stays set in memory either way: when this returns false because first-open
         // has not registered yet, the deferred identify still sends it within this launch, and the
@@ -674,6 +684,16 @@ actor CoreRuntime {
             guard !value.isEmpty, value.utf8.count <= 256,
                   !value.contains("@") else { return nil }
             return value
+        }
+        if opaqueID != nil, sanitized == nil {
+            // A REFUSED id is not a logout. Mapping it to nil and persisting that erased an id set
+            // earlier and re-submitted identify with no user, so a bad value silently DESTROYED the
+            // RevenueCat join key instead of being rejected. The published contract says rejected
+            // (apps/web/components/marketing/content.ts, "Identify users"); nil still clears.
+            configuration.diagnostic(
+                "AttriKit: setUserID(_:) refused an id that is empty, longer than 256 UTF-8 bytes, or contains '@'. The id already set is unchanged; pass nil explicitly to clear it."
+            )
+            return
         }
         pendingUserID = sanitized
         guard consent.allowsMeasurement, !deletionPending else { return }
@@ -901,26 +921,42 @@ actor CoreRuntime {
         let deviceEvidence = configuration.deviceEvidence()
         async let transaction = Self.boundedEvidence { await evidence.appTransactionJWS() }
         async let adServices = Self.boundedEvidence { await evidence.adServicesToken() }
-        let envelope = persistedBody == nil ? FirstOpenEnvelope(
-            installationID: identity.installationID,
-            installEpochID: identity.installEpochID,
-            occurredAt: configuration.now(),
-            appVersion: configuration.evidence.appVersion(),
-            coarseContext: configuration.evidence.coarseContext(),
-            consent: ConsentPayload(state: consent, policyVersion: 1),
-            appTransactionJWS: await transaction,
-            asaToken: await adServices,
-            exactTokenReference: exactToken,
-            webFirstParty: funnelIdentity.isEmpty ? nil : WebFirstPartyIdentity(funnelIdentity),
-            // Server rule (firstOpenEnvelopeSchema refine): idfa requires
-            // tracking_granted — sending it under measurement consent is a 422
-            // and the first-open is permanently lost. Gate client-side on the
-            // same rule. IDFV is consent-free. (wire-review P0-1, 2026-07-22)
-            idfa: consent.allowsTracking ? deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)) : nil,
-            idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:)),
-            localLineagePresent: identity.localLineagePresent,
-            localEpochPresent: identity.localEpochPresent
-        ) : nil
+        // ONE consent snapshot builds the envelope AND records it below. `consent` was read twice
+        // across the evidence suspension — once for the declared state, once for the idfa gate —
+        // so a grant landing in that window built a body DECLARING measurement_granted while
+        // CARRYING an idfa: the exact 422 the rule below exists to prevent, and that body was then
+        // persisted and cached under the new consent, so every later attempt replayed it. The
+        // snapshot is taken AFTER the awaits, so a withdrawal during them still drops the idfa.
+        var producingConsent = consent
+        var envelope: FirstOpenEnvelope?
+        if persistedBody == nil {
+            let occurredAt = configuration.now()
+            let appVersion = configuration.evidence.appVersion()
+            let coarseContext = configuration.evidence.coarseContext()
+            let appTransactionJWS = await transaction
+            let asaToken = await adServices
+            producingConsent = consent
+            envelope = FirstOpenEnvelope(
+                installationID: identity.installationID,
+                installEpochID: identity.installEpochID,
+                occurredAt: occurredAt,
+                appVersion: appVersion,
+                coarseContext: coarseContext,
+                consent: ConsentPayload(state: producingConsent, policyVersion: 1),
+                appTransactionJWS: appTransactionJWS,
+                asaToken: asaToken,
+                exactTokenReference: exactToken,
+                webFirstParty: funnelIdentity.isEmpty ? nil : WebFirstPartyIdentity(funnelIdentity),
+                // Server rule (firstOpenEnvelopeSchema refine): idfa requires
+                // tracking_granted — sending it under measurement consent is a 422
+                // and the first-open is permanently lost. Gate client-side on the
+                // same rule. IDFV is consent-free. (wire-review P0-1, 2026-07-22)
+                idfa: producingConsent.allowsTracking ? deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)) : nil,
+                idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:)),
+                localLineagePresent: identity.localLineagePresent,
+                localEpochPresent: identity.localEpochPresent
+            )
+        }
         do {
             let data: Data
             if let persistedBody {
@@ -945,9 +981,13 @@ actor CoreRuntime {
                     data = selectedFirstOpenBody.body
                 } else {
                     let encoded = try attriKitJSONEncoder().encode(envelope)
+                    // Recorded under the consent that BUILT these bytes, not under whatever the
+                    // consent is now: a change landing on the storage read above would otherwise
+                    // file an idfa-carrying body under a consent that forbids it, and the
+                    // fallback two branches up would replay it on every later attempt.
                     selectedFirstOpenBody = (
                         installEpochID: identity.installEpochID,
-                        consent: consent,
+                        consent: producingConsent,
                         body: encoded
                     )
                     // Persist BEFORE the send: a retry after a crash must re-send these exact
@@ -956,7 +996,7 @@ actor CoreRuntime {
                     try? await configuration.storage.setFirstOpenBody(
                         encoded,
                         installEpochID: identity.installEpochID,
-                        consent: consent
+                        consent: producingConsent
                     )
                     data = encoded
                 }
@@ -999,10 +1039,13 @@ actor CoreRuntime {
             // differs from ours. That is a registration, not a refusal, and the queue must be
             // released — the events will be accepted, because the epoch they name is there.
             //
-            // It is reached on ordinary relaunches. `submitFirstOpen` rebuilds the envelope with
-            // `occurredAt: configuration.now()` every time (:691, unlike Android which persists its
-            // body), so launch 2 hashes differently from launch 1 and conflicts. Treating that as a
-            // terminal refusal parked the queue for the rest of the install's life — a regression
+            // It used to be reached on ordinary relaunches: `submitFirstOpen` rebuilt the envelope
+            // with `occurredAt: configuration.now()` every time, so launch 2 hashed differently
+            // from launch 1 and conflicted. The persistence above now replays the stored bytes, so
+            // a relaunch normally repeats the SAME hash; a 409 is left for the cases persistence
+            // cannot cover (a failed write, a consent change, a body built by an older build).
+            // Treating it as a terminal refusal parked the queue for the rest of the install's
+            // life — a regression
             // introduced by this fix's own gate, since before the gate existed the flush simply
             // proceeded and succeeded. Caught by the 360 audit before the SDK was tagged.
             case 409:
@@ -1208,7 +1251,6 @@ actor CoreRuntime {
                 .get(path: "v1/attribution/\(identity.installEpochID.uuidString.lowercased())", etag: attributionETag)
             let response = try await sendMeasurementRequest(request)
             guard consent.allowsMeasurement, !deletionPending else { return nil }
-            if let etag = response.headers["etag"] { attributionETag = etag }
             switch response.statusCode {
             case 200:
                 let decoded = try attriKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
@@ -1236,15 +1278,17 @@ actor CoreRuntime {
             default:
                 break
             }
+            // Retained only AFTER the body was applied. Stored before the decode, a 200 whose body
+            // fails to parse threw to `catch` with the ETag kept: the next poll's If-None-Match then
+            // earned a 304, which falls to `default: break`, so the cache stayed nil for the rest of
+            // the session and attribution(timeout:) answered .timedOut against a server that had a
+            // match. A throw above skips this line, so a body we never applied leaves no validator.
+            if let etag = response.headers["etag"] { attributionETag = etag }
             return Self.retryAfterMilliseconds(response.headers["retry-after"])
         } catch {}
         return nil
     }
 
-    /// Parses the delta-seconds form of `Retry-After` (the only form the AttrKit API emits, see
-    /// apps/web/lib/api-route.ts) and clamps it to the ladder's own ceiling. An HTTP-date, a
-    /// non-numeric value or a non-positive value returns nil, so the caller falls back to its local
-    /// schedule, which is never slower than a hostile header could make it.
     /// True when a persisted first-open body contains an advertising identifier.
     ///
     /// Decodes rather than substring-matching: `idfa` appears in prose and in other field names,
@@ -1257,6 +1301,10 @@ actor CoreRuntime {
         return !(value is NSNull)
     }
 
+    /// Parses the delta-seconds form of `Retry-After` (the only form the AttrKit API emits, see
+    /// apps/web/lib/api-route.ts) and clamps it to the ladder's own ceiling. An HTTP-date, a
+    /// non-numeric value or a non-positive value returns nil, so the caller falls back to its local
+    /// schedule, which is never slower than a hostile header could make it.
     static func retryAfterMilliseconds(_ raw: String?) -> Int? {
         guard let seconds = raw.flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }), seconds > 0 else { return nil }
         return min(seconds, maximumRetryAfterSeconds) * 1_000
@@ -1458,7 +1506,10 @@ actor CoreRuntime {
     private func scheduleConsentReceiptDrain() {
         guard !deletionPending else { return }
         let mayDrainGrant = consent.allowsMeasurement && firstOpenRegistered
-        let mayDrainWithdrawal = consent == .denied || consent == .revoked
+        // Same terms as the drain's own `deliverWithdrawals` below. Omitting `allowsMeasurement`
+        // here meant that after a re-grant, and before first-open registers, neither gate was true,
+        // so no drain was scheduled for a withdrawal the drain would have delivered.
+        let mayDrainWithdrawal = consent.allowsMeasurement || consent == .denied || consent == .revoked
         guard mayDrainGrant || mayDrainWithdrawal else { return }
         guard consentReceiptTask == nil else { return }
         consentReceiptTaskGeneration += 1

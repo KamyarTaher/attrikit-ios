@@ -3,9 +3,17 @@ import XCTest
 @testable import AttriKitCore
 
 private func uncommentedFunctionBody(named name: String, in source: String) -> String? {
-    guard let provider = source.range(of: "struct ApplePlatformEvidenceProvider"),
-          let signature = source.range(of: "func \(name)(", range: provider.upperBound..<source.endIndex),
-          let opening = source[signature.upperBound...].firstIndex(of: "{") else { return nil }
+    // Locate on a comment-masked copy: a commented-out old copy of the function would otherwise
+    // be matched before the live one, and the helper would scan dead text.
+    let masked = commentMaskedSource(source)
+    guard let provider = masked.range(of: "struct ApplePlatformEvidenceProvider"),
+          let providerEnd = masked.range(of: "\n}", range: provider.upperBound..<masked.endIndex)?.upperBound,
+          let signature = masked.range(of: "func \(name)(", range: provider.upperBound..<providerEnd),
+          let maskedOpening = masked[signature.upperBound...].firstIndex(of: "{") else { return nil }
+    let opening = source.index(
+        source.startIndex,
+        offsetBy: masked.distance(from: masked.startIndex, to: maskedOpening)
+    )
     var depth = 1
     var index = source.index(after: opening)
     var body = ""
@@ -26,6 +34,15 @@ private func uncommentedFunctionBody(named name: String, in source: String) -> S
             inLineComment = comment.inLine
             inBlockComment = comment.inBlock
             index = next
+        } else if inString && character == "\\" {
+            // An escaped character inside a literal (`\"` above all) must not toggle the string
+            // state: one `\"` would otherwise leave the scanner inside a string for the rest of
+            // the body, no `}` would close it, and the helper would return nil -- a false RED.
+            body.append(character)
+            if next < source.endIndex {
+                body.append(following)
+                index = next
+            }
         } else {
             if character == "\"" { inString.toggle() }
             if !inString && character == "{" { depth += 1 }
@@ -38,6 +55,63 @@ private func uncommentedFunctionBody(named name: String, in source: String) -> S
         index = source.index(after: index)
     }
     return nil
+}
+
+/// `source` with every comment character replaced by a space, one character for one character, so
+/// an index into the result addresses the same character of `source`. Locating the signature in the
+/// raw text lets a commented-out copy of the function be matched instead of the live one.
+private func commentMaskedSource(_ source: String) -> String {
+    var masked = ""
+    var state = MaskState.code
+    var index = source.startIndex
+    while index < source.endIndex {
+        let next = source.index(after: index)
+        let following = next < source.endIndex ? source[next] : "\0"
+        let step = maskStep(state, source[index], following)
+        masked.append(step.output)
+        state = step.state
+        index = step.consumesFollowing ? source.index(after: next) : next
+    }
+    return masked
+}
+
+private enum MaskState {
+    case code, lineComment, blockComment
+    case string(escaped: Bool)
+}
+
+private typealias MaskOutput = (output: String, state: MaskState, consumesFollowing: Bool)
+
+/// One character of the mask: what to emit for `character`, the state after it, and whether the
+/// two-character token (`//`, `/*`, `*/`) also consumed `following`.
+private func maskStep(_ state: MaskState, _ character: Character, _ following: Character) -> MaskOutput {
+    switch state {
+    case .lineComment: return lineCommentMaskStep(character)
+    case .blockComment: return blockCommentMaskStep(character, following)
+    case .string(let escaped): return stringMaskStep(character, escaped: escaped)
+    case .code: return codeMaskStep(character, following)
+    }
+}
+
+private func lineCommentMaskStep(_ character: Character) -> MaskOutput {
+    return character == "\n" ? ("\n", .code, false) : (" ", .lineComment, false)
+}
+
+private func blockCommentMaskStep(_ character: Character, _ following: Character) -> MaskOutput {
+    if character == "*" && following == "/" { return ("  ", .code, true) }
+    return (character == "\n" ? "\n" : " ", .blockComment, false)
+}
+
+private func stringMaskStep(_ character: Character, escaped: Bool) -> MaskOutput {
+    if escaped { return (String(character), .string(escaped: false), false) }
+    if character == "\\" { return (String(character), .string(escaped: true), false) }
+    return (String(character), character == "\"" ? .code : .string(escaped: false), false)
+}
+
+private func codeMaskStep(_ character: Character, _ following: Character) -> MaskOutput {
+    if character == "/" && following == "/" { return ("  ", .lineComment, true) }
+    if character == "/" && following == "*" { return ("  ", .blockComment, true) }
+    return (String(character), character == "\"" ? .string(escaped: false) : .code, false)
 }
 
 private func consumeComment(_ character: Character, _ following: Character, _ inLine: Bool, _ inBlock: Bool) -> (inLine: Bool, inBlock: Bool, append: Bool, skipFollowing: Bool) {
@@ -59,7 +133,7 @@ private func productionLocaleGuardIsLive(in source: String) -> Bool {
           let assignmentRange = body.range(of: assignment),
           let returnRange = body.range(of: "return CoarseContext(") else { return false }
     guard assignmentRange.lowerBound < returnRange.lowerBound,
-          body[returnRange.lowerBound...].contains("locale: locale"),
+          argumentList(of: body, from: returnRange.upperBound).contains("locale: locale"),
           !body[..<assignmentRange.lowerBound].contains("return ") else { return false }
 
     guard body.range(of: "let tag =") != nil else { return false }
@@ -67,10 +141,35 @@ private func productionLocaleGuardIsLive(in source: String) -> Bool {
     return sourceBraceDepth(prefix) == 0 && conditionalCompilationIsBalanced(prefix)
 }
 
+/// The argument list of the call whose opening parenthesis ends at `start`, so a later `return`
+/// cannot supply the argument the first one dropped.
+private func argumentList(of body: String, from start: String.Index) -> Substring {
+    var depth = 1
+    var inString = false
+    var escaped = false
+    var index = start
+    while index < body.endIndex {
+        let character = body[index]
+        if escaped { escaped = false }
+        else if inString && character == "\\" { escaped = true }
+        else if character == "\"" { inString.toggle() }
+        else if !inString && character == "(" { depth += 1 }
+        else if !inString && character == ")" {
+            depth -= 1
+            if depth == 0 { return body[start..<index] }
+        }
+        index = body.index(after: index)
+    }
+    return body[start..<start]
+}
+
 private func sourceBraceDepth(_ source: Substring) -> Int {
     var depth = 0
     var inString = false
+    var escaped = false
     for character in source {
+        if escaped { escaped = false; continue }
+        if inString && character == "\\" { escaped = true; continue }
         if character == "\"" { inString.toggle() }
         if !inString && character == "{" { depth += 1 }
         if !inString && character == "}" { depth -= 1 }
@@ -158,6 +257,27 @@ final class PlatformEvidenceContractTests: XCTestCase {
         )
     }
 
+    /// The provider's own declaration bounds the search: a `coarseContext` belonging to another
+    /// type further down the file must never stand in for the one that left the provider.
+    func testAnUnrelatedTypesCopyCannotSatisfyTheProviderContract() {
+        let source = """
+        struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
+            func appVersion() -> String { "1" }
+        }
+        struct Other {
+            func coarseContext() -> CoarseContext {
+                let tag = "en"
+                let locale = tag.count <= CoarseContext.localeMaxLength ? tag : nil
+                return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: locale)
+            }
+        }
+        """
+        XCTAssertFalse(
+            productionLocaleGuardIsLive(in: source),
+            "a coarseContext outside ApplePlatformEvidenceProvider must not satisfy the contract"
+        )
+    }
+
     func testProductionLocaleAssignmentContainsTheServerCapGuard() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let source = testFile
@@ -199,6 +319,45 @@ final class PlatformEvidenceContractTests: XCTestCase {
         )
     }
 
+    func testAGuardSurvivingOnlyInACommentedOutCopyIsNotLive() {
+        let source = """
+        struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
+            /* superseded: func coarseContext() -> CoarseContext {
+                let tag = "en"
+                let locale = tag.count <= CoarseContext.localeMaxLength ? tag : nil
+                return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: locale)
+            } */
+            func coarseContext() -> CoarseContext {
+                let tag = "en"
+                let locale = tag
+                return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: locale)
+            }
+        }
+        """
+        XCTAssertFalse(
+            productionLocaleGuardIsLive(in: source),
+            "the signature of a commented-out copy must not be mistaken for the live function"
+        )
+    }
+
+    func testAnEscapedQuoteDoesNotHideTheGuard() {
+        let source = """
+        struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
+            func coarseContext() -> CoarseContext {
+                let note = "a\\"b"
+                _ = note
+                let tag = "en"
+                let locale = tag.count <= CoarseContext.localeMaxLength ? tag : nil
+                return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: locale)
+            }
+        }
+        """
+        XCTAssertTrue(
+            productionLocaleGuardIsLive(in: source),
+            "an escaped quote must not desynchronise the scanner and read as a missing guard"
+        )
+    }
+
     func testCurrentLocaleIsProducedAndFitsTheServersCap() throws {
         let context = ApplePlatformEvidenceProvider().coarseContext()
         let locale = try XCTUnwrap(
@@ -229,6 +388,15 @@ final class PlatformEvidenceContractTests: XCTestCase {
         }
     }
 
+    func testBraceDepthIgnoresBracesInsideAnEscapedQuote() {
+        let line = "let note = \"a\\\"{\""
+        XCTAssertEqual(
+            sourceBraceDepth(line[...]),
+            0,
+            "an escaped quote must not leave the brace counter reading string content as code"
+        )
+    }
+
     /// The rule itself, on the inputs this host cannot be made to produce. `identifier(.bcp47)`
     /// renders a keyword-bearing identifier as a tag; the cap is then a real bound rather than a
     /// hope, and the drop-rather-than-truncate rule is exercised on a value that exceeds it.
@@ -252,5 +420,24 @@ final class PlatformEvidenceContractTests: XCTestCase {
             )
             XCTAssertFalse(tag.contains("@"), "the BCP-47 rendering kept an ICU keyword section")
         }
+    }
+
+    func testALaterReturnCannotSupplyTheLocaleTheFirstOneDropped() {
+        let source = """
+        struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
+            func coarseContext() -> CoarseContext {
+                let tag = "en"
+                let locale = tag.count <= CoarseContext.localeMaxLength ? tag : nil
+                if tag.isEmpty {
+                    return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: nil)
+                }
+                return CoarseContext(countryCode: nil, osMajor: "1", deviceClass: "phone", locale: locale)
+            }
+        }
+        """
+        XCTAssertFalse(
+            productionLocaleGuardIsLive(in: source),
+            "a first return that drops the locale must not be excused by a later one that keeps it"
+        )
     }
 }
