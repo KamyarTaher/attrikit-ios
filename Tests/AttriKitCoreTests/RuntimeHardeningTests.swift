@@ -1702,6 +1702,10 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertTrue(registered, "precondition: first-open must register before identify can run")
 
         let token = "ak1_" + String(repeating: "U", count: 43)
+        // acceptExactToken awaits submitIdentify() inline (CoreRuntime.swift:667), and first-open
+        // has already registered, so the send -- and the spend decision that follows it -- is
+        // complete before this returns. That inline await is the whole ordering this case needs;
+        // the DEFERRED re-fire, which has no such await, is covered by the case below.
         let accepted = await runtime.acceptExactToken(token, kind: "clipboard")
         XCTAssertNotEqual(accepted, .ignored)
         let deliveryAttempted = await waitUntil { await self.identifyRequestCount(in: transport) >= 1 }
@@ -1711,6 +1715,56 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertTrue(
             unspentAfterFailure,
             "an unacknowledged token must stay unspent so a later attempt can carry it",
+        )
+        await runtime.shutdown()
+    }
+
+    // The path the inline await above does NOT cover: when the token is accepted before first-open
+    // has registered, submitIdentify returns .deferred and the send that actually carries the token
+    // is the re-fire from registerFirstOpen (CoreRuntime.swift:1330), a detached actor job whose
+    // result nothing awaits. Reading storage without joining that job is the vacuous pass F-13387
+    // named: `identifyRequestCount >= 1` is satisfied when StubTransport RECORDS the request
+    // (TestSupport.swift:31), before the responder throws and before the spend decision is reached.
+    func testADeferredIdentifyReFireThatIsNotAcknowledgedLeavesTheTokenUnspent() async throws {
+        let storage = makeStorage(label: "TokenUnspentOnDeferredReFire")
+        let firstOpenGate = TestQueueGate()
+        let transport = StubTransport { request, _ in
+            if request.url?.path.hasSuffix("/v1/ingest/identify") == true {
+                throw URLError(.notConnectedToInternet)
+            }
+            if request.url?.path.hasSuffix("/v1/ingest/first-open") == true {
+                await firstOpenGate.enter()
+            }
+            return successResult()
+        }
+        let runtime = makeRuntime(storage: storage, transport: transport)
+        // start() returns once first-open has been HANDED to a task (CoreRuntime.swift:1651), so
+        // parking the transport leaves apiKey and identity set with firstOpenRegistered still false
+        // -- the only window in which submitIdentify defers.
+        await runtime.start(apiKey: apiKey, consent: .trackingGranted)
+        await firstOpenGate.waitStarted()
+
+        let token = "ak1_" + String(repeating: "U", count: 43)
+        let accepted = await runtime.acceptExactToken(token, kind: "clipboard")
+        XCTAssertNotEqual(accepted, .ignored)
+        let identifiesBeforeRegistration = await identifyRequestCount(in: transport)
+        XCTAssertEqual(
+            identifiesBeforeRegistration,
+            0,
+            "precondition: the inline identify must have DEFERRED, not sent, before registration"
+        )
+
+        firstOpenGate.release()
+        let reFired = await waitUntil { await self.identifyRequestCount(in: transport) >= 1 }
+        XCTAssertTrue(reFired, "precondition: registration must re-fire the deferred identify")
+
+        // Join the re-fire. Without this the read below races the job that decides whether to spend.
+        await runtime.joinIdentifyForTesting()
+
+        let unspentAfterFailure = await storage.isExactTokenNew(token)
+        XCTAssertTrue(
+            unspentAfterFailure,
+            "an unacknowledged deferred identify must leave the token unspent for the next launch"
         )
         await runtime.shutdown()
     }
@@ -2060,6 +2114,144 @@ final class RuntimeHardeningTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    /// Preserves the historical empty-string logout idiom on the compatible line (`setUserID("")` clears
+    /// the stored ID), while verifying that a non-empty INVALID value (e.g. containing '@' or > 256 bytes)
+    /// never clears a previously valid stored ID.
+    func testSetUserIDEmptyStringClearsAndNonEmptyInvalidDoesNotClear() async throws {
+        let transport = StubTransport { _, _ in successResult() }
+        let storage = makeStorage(label: "EmptyStringLogout")
+        let runtime = makeRuntime(storage: storage, transport: transport)
+        await runtime.start(apiKey: apiKey, consent: .measurementGranted)
+
+        // 1. Set a valid user ID.
+        await runtime.setUserID("user-valid-1")
+        let persisted1 = await waitUntil { await storage.storedUserID() == "user-valid-1" }
+        XCTAssertTrue(persisted1, "precondition: valid user id is stored")
+
+        // 2. Passing a non-empty invalid ID (contains '@') must NOT clear the valid ID.
+        await runtime.setUserID("bad-email@domain.com")
+        let afterEmail = await storage.storedUserID()
+        XCTAssertEqual(afterEmail, "user-valid-1", "non-empty invalid id must not clear stored id")
+
+        // 3. Passing a non-empty invalid ID (oversized > 256 bytes) must NOT clear the valid ID.
+        let oversized = String(repeating: "x", count: 257)
+        await runtime.setUserID(oversized)
+        let afterOversized = await storage.storedUserID()
+        XCTAssertEqual(afterOversized, "user-valid-1", "oversized invalid id must not clear stored id")
+
+        // 4. Passing empty string "" MUST clear the stored ID (historical logout idiom).
+        await runtime.setUserID("")
+        let afterEmptyClear = await storage.storedUserID()
+        XCTAssertNil(afterEmptyClear, "setUserID(\"\") must clear the stored id (logout idiom)")
+
+        // 5. Re-set valid ID, then clear with explicit nil.
+        await runtime.setUserID("user-valid-2")
+        let persisted2 = await waitUntil { await storage.storedUserID() == "user-valid-2" }
+        XCTAssertTrue(persisted2, "precondition: valid user id re-stored")
+
+        await runtime.setUserID(nil)
+        let afterNilClear = await storage.storedUserID()
+        XCTAssertNil(afterNilClear, "setUserID(nil) must clear the stored id")
+
+        await runtime.shutdown()
+    }
+
+    /// An 8-digit numeric property value is rejected as a suspected phone number.
+    /// The regex (?<!\d)\+?\d[\d\s().-]*\d(?!\d) with digit count >= 8 classifies both
+    /// unpunctuated 8+ digit numbers and punctuated strings with 8+ digits (such as dates,
+    /// dotted numbers, and parenthesized phone numbers) as phone numbers and rejects them.
+    /// 7-digit strings with or without punctuation are accepted.
+    func testPropertyValidationRejectsEightDigitNumericString() {
+        // Unpunctuated 8-digit string
+        XCTAssertThrowsError(
+            try validateProperties(["order_id": "12345678"]),
+            "8-digit numeric string must be rejected as suspected phone number"
+        ) { error in
+            XCTAssertEqual(error as? AttriKitError, .invalidProperty)
+        }
+
+        // Punctuated examples containing >= 8 digits
+        XCTAssertThrowsError(
+            try validateProperties(["order_date": "2026-09-08"]),
+            "8-digit punctuated ISO date string must be rejected as suspected phone number"
+        ) { error in
+            XCTAssertEqual(error as? AttriKitError, .invalidProperty)
+        }
+
+        XCTAssertThrowsError(
+            try validateProperties(["dotted": "1.234.567.8"]),
+            "8-digit dotted numeric string must be rejected as suspected phone number"
+        ) { error in
+            XCTAssertEqual(error as? AttriKitError, .invalidProperty)
+        }
+
+        XCTAssertThrowsError(
+            try validateProperties(["support_line": "(12) 3456 78"]),
+            "8-digit spaced and parenthesized numeric string must be rejected as suspected phone number"
+        ) { error in
+            XCTAssertEqual(error as? AttriKitError, .invalidProperty)
+        }
+
+        // Negative examples: 7 digits (unpunctuated and punctuated) under the threshold
+        XCTAssertNoThrow(
+            try validateProperties(["order_id": "1234567"]),
+            "7-digit numeric string is under the phone threshold and must be accepted"
+        )
+
+        XCTAssertNoThrow(
+            try validateProperties(["partial_date": "2026-09-7"]),
+            "7-digit punctuated string is under the phone threshold and must be accepted"
+        )
+
+        XCTAssertNoThrow(
+            try validateProperties(["ref_code": "123-4567"]),
+            "7-digit hyphenated string is under the phone threshold and must be accepted"
+        )
+
+        XCTAssertNoThrow(
+            try validateProperties(["grouped_code": "(12) 345 67"]),
+            "7-digit grouped string is under the phone threshold and must be accepted"
+        )
+    }
+
+    /// Trailing-newline event names must be rejected by exact regex match.
+    func testEventNameValidationRejectsTrailingNewline() {
+        XCTAssertThrowsError(
+            try AttriKitEvent("purchase\n"),
+            "event name with trailing newline must be rejected"
+        ) { error in
+            XCTAssertEqual(error as? AttriKitError, .invalidEventName)
+        }
+        XCTAssertNoThrow(
+            try AttriKitEvent("purchase"),
+            "clean event name must be accepted"
+        )
+    }
+
+    /// 3-digit UN M.49 region codes (e.g. "419" for Latin America, "001" for World) must be filtered to nil
+    /// in the SDK's coarseContext so server validation requiring ISO 3166-1 alpha-2 does not 422.
+    func testCountryCodeFiltersThreeDigitRegionCodes() {
+        defer { ApplePlatformEvidenceProvider.localeOverrideForTesting = nil }
+
+        // 2-letter ISO 3166-1 alpha-2 country codes are preserved
+        ApplePlatformEvidenceProvider.localeOverrideForTesting = Locale(identifier: "fr_CH")
+        let switzerland = ApplePlatformEvidenceProvider().coarseContext()
+        XCTAssertEqual(switzerland.countryCode, "CH", "2-letter ISO country code must be preserved")
+
+        ApplePlatformEvidenceProvider.localeOverrideForTesting = Locale(identifier: "en_US")
+        let unitedStates = ApplePlatformEvidenceProvider().coarseContext()
+        XCTAssertEqual(unitedStates.countryCode, "US", "2-letter ISO country code must be preserved")
+
+        // 3-digit UN M.49 region codes are filtered to nil
+        ApplePlatformEvidenceProvider.localeOverrideForTesting = Locale(identifier: "es_419")
+        let latinAmerica = ApplePlatformEvidenceProvider().coarseContext()
+        XCTAssertNil(latinAmerica.countryCode, "3-digit UN M.49 code (419) must be mapped to nil")
+
+        ApplePlatformEvidenceProvider.localeOverrideForTesting = Locale(identifier: "en_001")
+        let world = ApplePlatformEvidenceProvider().coarseContext()
+        XCTAssertNil(world.countryCode, "3-digit UN M.49 code (001) must be mapped to nil")
+    }
+
     private func makeRuntime(
         storage: SDKStorage,
         transport: HTTPTransport,
@@ -2109,29 +2301,40 @@ final class RuntimeHardeningTests: XCTestCase {
         await waitUntil { await eventBatchRequests(in: transport).count >= 1 }
     }
 
-    /// The consent-attempt count once it has stopped moving, so a bound asserted on it cannot be
-    /// satisfied by reading between two attempts of a spin. Returns the LAST sample, and reports
-    /// the count still changing at the deadline rather than returning a number nobody can trust.
+    /// Returns the consent-attempt count once it has held the SAME value across a continuous quiet
+    /// window of `quietSamples` consecutive 10ms samples, and fails the case if no such window is
+    /// observed within `settling`. That window, not "the count stopped moving", is exactly what this
+    /// measures: a count advancing on a cadence slower than the window is indistinguishable here
+    /// from a settled one, so the window is the blind spot, stated rather than implied. It is sized
+    /// against the thing being refused -- a retry SPIN, whose whole point is a cadence far below it.
     private func settledConsentAttemptCount(
         in transport: StubTransport,
-        settling: Duration = .milliseconds(500)
+        settling: Duration = .milliseconds(500),
+        quietSamples: Int = 20
     ) async -> Int {
+        let sampleInterval = Duration.milliseconds(10)
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: settling)
         var latest = await consentAttemptCount(in: transport)
         var equalSamples = 1
         while clock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(10))
+            try? await Task.sleep(for: sampleInterval)
             let current = await consentAttemptCount(in: transport)
             if current == latest {
                 equalSamples += 1
+                // Returning HERE is what makes the window a measurement rather than a description:
+                // running to the deadline regardless would report a number sampled mid-flight.
+                if equalSamples >= quietSamples { return latest }
             } else {
                 latest = current
                 equalSamples = 1
             }
         }
-        if equalSamples < 2 {
-            XCTFail("the consent attempt count was still moving at the settling deadline")
+        if equalSamples < quietSamples {
+            XCTFail(
+                "the consent attempt count never held still for \(quietSamples) consecutive samples "
+                    + "within \(settling); longest trailing quiet run was \(equalSamples)"
+            )
         }
         return latest
     }

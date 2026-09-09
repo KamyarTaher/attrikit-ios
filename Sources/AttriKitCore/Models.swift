@@ -1,6 +1,6 @@
 import Foundation
 
-let attriKitSDKVersion = "2.3.3"
+let attriKitSDKVersion = "2.4.0"
 
 struct ConsentPayload: Codable, Sendable {
     let state: AttriKitConsent

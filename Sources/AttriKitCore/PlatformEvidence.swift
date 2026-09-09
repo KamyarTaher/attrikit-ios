@@ -13,6 +13,10 @@ protocol PlatformEvidenceProviding: Sendable {
 }
 
 struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
+    #if DEBUG
+    nonisolated(unsafe) static var localeOverrideForTesting: Locale?
+    #endif
+
     func appTransactionJWS() async -> String? {
         #if os(iOS)
         do {
@@ -105,14 +109,19 @@ struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
         // Extensions such as calendar, numbering system, and region overrides are valid BCP-47,
         // but are not coarse context and can push an otherwise ordinary locale past the wire cap.
         // Emit only the language/script/region identity that attribution actually consumes.
-        let language = Locale.current.language
+        #if DEBUG
+        let activeLocale = Self.localeOverrideForTesting ?? Locale.current
+        #else
+        let activeLocale = Locale.current
+        #endif
+        let language = activeLocale.language
         let tag = [
             language.languageCode?.identifier,
             language.script?.identifier,
             language.region?.identifier,
         ].compactMap { $0 }.joined(separator: "-")
         let locale = tag.count <= CoarseContext.localeMaxLength ? tag : nil
-        let rawCountry = Locale.current.region?.identifier.uppercased()
+        let rawCountry = activeLocale.region?.identifier.uppercased()
         let country = rawCountry.flatMap { value in
             value.utf8.count == 2 && value.utf8.allSatisfy { 65...90 ~= $0 } ? value : nil
         }

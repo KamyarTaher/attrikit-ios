@@ -31,13 +31,12 @@ final class NonConformingServerSessionTests: XCTestCase {
         await AttriKit.configureForTesting(configuration)
 
         AttriKit.start(apiKey: apiKey, consent: .measurementGranted)
-        let result = await AttriKit.attribution(timeout: .zero)
-
-        XCTAssertEqual(result, .timedOut)
         let armed = await waitUntil {
             await configuration.storage.retryState() != nil
         }
         XCTAssertTrue(armed, "a non-conforming 200 must arm the first-open retry ladder")
+        let result = await AttriKit.attribution(timeout: .zero)
+        XCTAssertEqual(result, .timedOut)
         let stored = await configuration.storage.retryState()
         let retry = try XCTUnwrap(stored)
         XCTAssertEqual(retry.attempt, 1)

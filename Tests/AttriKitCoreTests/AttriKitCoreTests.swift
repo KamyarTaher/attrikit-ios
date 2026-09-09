@@ -259,8 +259,8 @@ private static func liveEndpoint() -> URL {
     }
 
     func testFirstOpenIncludesHashedPIIAndAvailableDeviceIdentifiers() async throws {
-        let idfa = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
-        let idfv = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let idfa = UUID(uuidString: "33333333-3333-4333-8333-33333333333a")!
+        let idfv = UUID(uuidString: "44444444-4444-4444-8444-44444444444b")!
         let transport = StubTransport { _, _ in successResult() }
         await AttriKit.configureForTesting(makeTestConfiguration(
             transport: transport,
@@ -539,7 +539,7 @@ private static func liveEndpoint() -> URL {
         let bodies = allRequests
             .filter { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
             .compactMap(\.httpBody)
-        XCTAssertEqual(bodies.count, 2)
+        guard bodies.count == 2 else { return XCTFail("Expected 2 first-open requests, got \(bodies.count)") }
         XCTAssertEqual(bodies[0], bodies[1],
                        "the two attempts sent different bytes for the same epoch — the relaunch would 409 forever")
     }
@@ -646,10 +646,8 @@ private static func liveEndpoint() -> URL {
             localLineagePresent: true,
             localEpochPresent: false
         )
-        let actual = try JSONSerialization.jsonObject(with: attriKitJSONEncoder().encode(envelope)) as! NSDictionary
         let goldenURL = try XCTUnwrap(Bundle.module.url(forResource: "first-open", withExtension: "json", subdirectory: "Fixtures"))
-        let expected = try JSONSerialization.jsonObject(with: Data(contentsOf: goldenURL)) as! NSDictionary
-        XCTAssertEqual(actual, expected)
+        XCTAssertEqual(try attriKitJSONEncoder().encode(envelope), try Data(contentsOf: goldenURL))
     }
 
     func testAttributionSuspendsUntilResolvedThenCaches() async {
@@ -669,6 +667,887 @@ private static func liveEndpoint() -> URL {
         XCTAssertEqual(cached, result)
         let cachedRequestCount = await transport.requests().count
         XCTAssertEqual(cachedRequestCount, requestCount)
+    }
+
+    func testAttributionPendingResponseWithETagDoesNotStallSubsequentPollOn304() async {
+        let getCounter = TestPollCounter()
+        let transport = StubTransport { request, _ in
+            guard request.httpMethod == "GET" else {
+                return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+            }
+            if request.value(forHTTPHeaderField: "If-None-Match") != nil {
+                return successResult(status: 304, body: "")
+            }
+            if getCounter.next() == 1 {
+                return successResult(
+                    status: 202,
+                    body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#,
+                    headers: ["etag": "\"pending-v1\""]
+                )
+            }
+            return successResult(
+                body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_etag_pending","finality":"provisional","policy_version":1,"version":1}"#,
+                headers: ["etag": "\"v1\""]
+            )
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let result = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let attribution) = result else {
+            return XCTFail("Expected attributed result, but got \(result)")
+        }
+        XCTAssertEqual(attribution.campaignID, "c_etag_pending")
+    }
+
+    /// When consent revocation and re-grant rotates the install epoch, any retained attribution
+    /// validator from the previous epoch must be cleared. If kept, the new epoch's first poll sends
+    /// `If-None-Match: "v1"`. If the new epoch's attribution record is also version 1, the server
+    /// returns 304 Not Modified which is ignored, leaving `attributionCache` nil and timing out.
+    func testConsentRevocationAndRegrantClearsAttributionETagSoNewEpochDoesNotStallOn304() async {
+        final class ServerState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var firstEpochPath: String?
+
+            func handle(request: URLRequest) -> HTTPResult {
+                lock.lock()
+                defer { lock.unlock() }
+
+                guard request.httpMethod == "GET" else {
+                    return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+                }
+                let path = request.url?.path ?? ""
+                if firstEpochPath == nil {
+                    firstEpochPath = path
+                }
+                if path == firstEpochPath {
+                    return successResult(
+                        body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c1","finality":"provisional","policy_version":1,"version":1}"#,
+                        headers: ["etag": "\"v1\""]
+                    )
+                }
+                // Next epoch poll:
+                if request.value(forHTTPHeaderField: "If-None-Match") != nil {
+                    return successResult(status: 304, body: "")
+                }
+                return successResult(
+                    body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c2","finality":"provisional","policy_version":1,"version":1}"#,
+                    headers: ["etag": "\"v1\""]
+                )
+            }
+        }
+
+        let server = ServerState()
+        let transport = StubTransport { request, _ in
+            server.handle(request: request)
+        }
+
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        let firstResult = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let attribution1) = firstResult else {
+            return XCTFail("Expected first epoch attributed result, but got \(firstResult)")
+        }
+        XCTAssertEqual(attribution1.campaignID, "c1")
+
+        AttriKit.setConsent(.revoked)
+        AttriKit.setConsent(.measurementGranted)
+
+        let secondResult = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let attribution2) = secondResult else {
+            return XCTFail("Expected second epoch attributed result, but got \(secondResult)")
+        }
+        XCTAssertEqual(attribution2.campaignID, "c2")
+    }
+
+    func testOmittingQueueBoundReproducesLegacyBehaviorIncludingZeroTimeout() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_legacy","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let attribution) = resolved else { return XCTFail("Expected attributed, got \(resolved)") }
+        XCTAssertEqual(attribution.campaignID, "c_legacy")
+
+        // Enqueue a delayed background operation. Omitting the queue bound must drain the queue
+        // first, then evaluate the operation and return the cached attribution for timeout: .zero.
+        let flag = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            try? await Task.sleep(for: .milliseconds(30))
+            flag.set()
+        }
+        let cached = await AttriKit.attribution(timeout: .zero)
+        XCTAssertTrue(flag.isSet, "omitting queue bound must drain enqueued operations before evaluating")
+        XCTAssertEqual(cached, resolved)
+
+        // Placement parameters must also succeed with timeout: .zero when the queue bound is omitted.
+        AttriKit.enqueueForTesting { _ in
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        let params = await AttriKit.placementParameters(timeout: .zero)
+        XCTAssertFalse(params.isEmpty)
+        XCTAssertEqual(params["attrkit_campaign_id"], "c_legacy")
+
+        // Explicit nil must behave identically to omitting the argument.
+        let explicitNilFlag = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            try? await Task.sleep(for: .milliseconds(30))
+            explicitNilFlag.set()
+        }
+        let explicitNil = await AttriKit.attribution(timeout: .zero, queueTimeout: nil)
+        XCTAssertTrue(explicitNilFlag.isSet, "explicit nil queueTimeout must drain enqueued operations before evaluating")
+        XCTAssertEqual(explicitNil, resolved)
+    }
+
+    // The same contract as the `flag.isSet` assertion inside
+    // testAttributionSuspendsUntilResolvedThenCaches, isolated. There, a mutant that removes the
+    // drain reddens the ENCLOSING guard ("Expected attributed, got notStarted") before the drain
+    // assertion is ever reached, so that case cannot show a mutant reddening exactly this claim.
+    // Here nothing but the drain is asserted, so a mutant that skips it can fail nothing else.
+    func testOmittingTheQueueBoundDrainsEnqueuedWorkBeforeEvaluating() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        let flag = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            try? await Task.sleep(for: .milliseconds(30))
+            flag.set()
+        }
+
+        _ = await AttriKit.attribution(timeout: .zero)
+        XCTAssertTrue(flag.isSet, "omitting the queue bound must drain enqueued operations before evaluating")
+    }
+
+    func testQueueBoundBoundsSlowQueueDrain() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        // Enqueue a slow operation onto the facade queue using a gate.
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        let clock = ContinuousClock()
+
+        // 1. attribution(timeout:queueTimeout:) times out waiting for the queue and returns .timedOut.
+        let startAttr = clock.now
+        let attrResult = await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .milliseconds(40))
+        let attrElapsed = clock.now - startAttr
+
+        XCTAssertEqual(attrResult, .timedOut)
+        XCTAssertLessThan(attrElapsed, .milliseconds(400), "attribution must not block for the slow queue drain")
+
+        // 2. placementParameters(timeout:queueTimeout:) returns empty dictionary within the bound.
+        let startParams = clock.now
+        let paramsResult = await AttriKit.placementParameters(timeout: .seconds(2), queueTimeout: .milliseconds(40))
+        let paramsElapsed = clock.now - startParams
+
+        XCTAssertEqual(paramsResult, [:])
+        XCTAssertLessThan(paramsElapsed, .milliseconds(400), "placementParameters must not block for the slow queue drain")
+
+        // 3. queueBound alias behaves identically.
+        let startAlias = clock.now
+        let aliasResult = await AttriKit.attribution(timeout: .seconds(2), queueBound: .milliseconds(40))
+        let aliasElapsed = clock.now - startAlias
+
+        XCTAssertEqual(aliasResult, .timedOut)
+        XCTAssertLessThan(aliasElapsed, .milliseconds(400), "queueBound alias must not block for the slow queue drain")
+
+        gate.release()
+    }
+
+    func testQueueBoundSucceedsWhenQueueDrainsWithinBound() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_fast","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let attribution) = resolved else { return XCTFail("Expected attributed, got \(resolved)") }
+        XCTAssertEqual(attribution.campaignID, "c_fast")
+
+        // Enqueue a fast 10ms operation; bound is 400ms. The queue drain finishes within bound.
+        AttriKit.enqueueForTesting { _ in
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let cached = await AttriKit.attribution(timeout: .zero, queueTimeout: .milliseconds(400))
+        XCTAssertEqual(cached, resolved)
+    }
+
+    func testQueueDrainCancellationReturnsBeforeQueueRelease() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let gate = TestQueueGate()
+        let queueReleased = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+            queueReleased.set()
+        }
+        await gate.waitStarted()
+
+        let callerTask = Task {
+            await AttriKit.attribution(timeout: .seconds(5), queueTimeout: .seconds(5))
+        }
+
+        let registered = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 1
+        }
+        XCTAssertTrue(registered, "waiter must be registered")
+
+        let initialTimeouts = AttriKit.resolveTimeoutCountForTesting()
+        XCTAssertEqual(initialTimeouts, 0, "fresh configuration must have 0 timeouts")
+
+        let cancellationClock = ContinuousClock()
+        let cancelledAt = cancellationClock.now
+        callerTask.cancel()
+        let result = await callerTask.value
+        XCTAssertLessThan(cancelledAt.duration(to: cancellationClock.now), .seconds(1),
+                          "cancellation must finish before the five-second queue timeout")
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertFalse(queueReleased.isSet, "cancellation must return before queue is released")
+        try? await Task.sleep(for: .seconds(5) + .milliseconds(100))
+        XCTAssertEqual(AttriKit.resolveTimeoutCountForTesting(), initialTimeouts, "cancelled timer task must not invoke resolveTimeout")
+
+        gate.release()
+    }
+
+    func testRepeatedTimeoutsAndCancelsLeaveZeroRegisteredWaitersWhileBlocked() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        // Repeated timeouts while queue is blocked
+        for _ in 0..<3 {
+            let result = await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .milliseconds(20))
+            XCTAssertEqual(result, .timedOut)
+        }
+
+        // Repeated cancels while queue is blocked
+        for _ in 0..<3 {
+            let callerTask = Task {
+                await AttriKit.attribution(timeout: .seconds(5), queueTimeout: .seconds(5))
+            }
+            let registered = await waitUntil {
+                AttriKit.registeredWaitersCountForTesting() == 1
+            }
+            XCTAssertTrue(registered)
+            callerTask.cancel()
+            let result = await callerTask.value
+            XCTAssertEqual(result, .failed)
+        }
+
+        // Narrow test seam assertion while still blocked:
+        XCTAssertEqual(
+            AttriKit.registeredWaitersCountForTesting(),
+            0,
+            "repeated timeouts and cancels must leave 0 registered waiters while queue is blocked"
+        )
+
+        gate.release()
+    }
+
+    func testQueueDrainCancellationBeforeRegistrationReturnsFailedWhileQueueHeld() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let gate = TestQueueGate()
+        let queueReleased = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+            queueReleased.set()
+        }
+        await gate.waitStarted()
+
+        // 1. attribution(timeout:queueTimeout:) cancelled before registration
+        let clock = ContinuousClock()
+        let startAttr = clock.now
+        let taskAttr = Task { () -> AttributionResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.attribution(timeout: .seconds(5), queueTimeout: .seconds(5))
+        }
+        let resultAttr = await taskAttr.value
+        let elapsedAttr = clock.now - startAttr
+        XCTAssertEqual(resultAttr, .failed, "cancellation before registration must return .failed")
+        XCTAssertLessThan(elapsedAttr, .seconds(1), "must return in less than one second for five-second budget")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        // 2. attribution(timeout:queueBound:) alias cancelled before registration
+        let startAlias = clock.now
+        let taskAlias = Task { () -> AttributionResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.attribution(timeout: .seconds(5), queueBound: .seconds(5))
+        }
+        let resultAlias = await taskAlias.value
+        let elapsedAlias = clock.now - startAlias
+        XCTAssertEqual(resultAlias, .failed, "queueBound alias cancellation before registration must return .failed")
+        XCTAssertLessThan(elapsedAlias, .seconds(1), "must return in less than one second for five-second budget")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        // 3. placementParameters(timeout:queueTimeout:) cancelled before registration
+        let startParams = clock.now
+        let taskParams = Task { () -> [String: String] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.placementParameters(timeout: .seconds(5), queueTimeout: .seconds(5))
+        }
+        let resultParams = await taskParams.value
+        let elapsedParams = clock.now - startParams
+        XCTAssertTrue(resultParams.isEmpty, "placement parameters must be empty when cancelled before registration")
+        XCTAssertLessThan(elapsedParams, .seconds(1), "must return in less than one second for five-second budget")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        // 4. placementParameters(timeout:queueBound:) alias cancelled before registration
+        let startAliasParams = clock.now
+        let taskAliasParams = Task { () -> [String: String] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.placementParameters(timeout: .seconds(5), queueBound: .seconds(5))
+        }
+        let resultAliasParams = await taskAliasParams.value
+        let elapsedAliasParams = clock.now - startAliasParams
+        XCTAssertTrue(resultAliasParams.isEmpty, "alias placement parameters must be empty when cancelled before registration")
+        XCTAssertLessThan(elapsedAliasParams, .seconds(1), "must return in less than one second for five-second budget")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        gate.release()
+    }
+
+    func testBoundedDrainCancelledBeforeCallOnAlreadyDrainedQueueReturnsFailedWithZeroWaiters() async {
+        let transport = StubTransport { request, _ in
+            if request.httpMethod == "GET" {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_drained_cancel","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        // Ensure queue is drained and attribution would succeed if not cancelled
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed = resolved else {
+            return XCTFail("Expected attribution to succeed")
+        }
+
+        // Queue is drained: completedGeneration >= enqueueGeneration
+        let clock = ContinuousClock()
+        let start = clock.now
+        let task = Task { () -> AttributionResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.attribution(timeout: .seconds(5), queueTimeout: .seconds(5))
+        }
+        let result = await task.value
+        let elapsed = clock.now - start
+
+        XCTAssertEqual(result, .failed, "cancelled call on drained queue must return .failed")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertLessThan(elapsed, .milliseconds(500), "must return immediately without wait")
+    }
+
+    func testHeldQueueCancellationWinsOverZeroQueueTimeout() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let gate = TestQueueGate()
+        let queueReleased = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+            queueReleased.set()
+        }
+        await gate.waitStarted()
+
+        // 1. attribution(timeout:queueTimeout: .zero) cancelled before call
+        let clock = ContinuousClock()
+        let startTimeout = clock.now
+        let taskTimeout = Task { () -> AttributionResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.attribution(timeout: .seconds(5), queueTimeout: .zero)
+        }
+        let resultTimeout = await taskTimeout.value
+        let elapsedTimeout = clock.now - startTimeout
+        XCTAssertEqual(resultTimeout, .failed, "pre-cancelled call with queueTimeout .zero must return .failed")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertLessThan(elapsedTimeout, .milliseconds(500), "must return immediately without wait")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        // 2. attribution(timeout:queueBound: .zero) alias cancelled before call
+        let startBound = clock.now
+        let taskBound = Task { () -> AttributionResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await AttriKit.attribution(timeout: .seconds(5), queueBound: .zero)
+        }
+        let resultBound = await taskBound.value
+        let elapsedBound = clock.now - startBound
+        XCTAssertEqual(resultBound, .failed, "pre-cancelled call with queueBound .zero alias must return .failed")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must not be registered")
+        XCTAssertLessThan(elapsedBound, .milliseconds(500), "must return immediately without wait")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+
+        gate.release()
+    }
+
+    func testQueueDrainCancellationAndTimeoutForAliasAndPlacement() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let gate = TestQueueGate()
+        let queueReleased = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+            queueReleased.set()
+        }
+        await gate.waitStarted()
+
+        // 1. attribution(timeout:queueBound:) cancelled while registered
+        let callerTaskAlias = Task {
+            await AttriKit.attribution(timeout: .seconds(5), queueBound: .seconds(5))
+        }
+        let registered1 = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 1
+        }
+        XCTAssertTrue(registered1, "waiter must be registered")
+        let clock = ContinuousClock()
+        let cancelledAt1 = clock.now
+        callerTaskAlias.cancel()
+        let resultAlias = await callerTaskAlias.value
+        XCTAssertLessThan(cancelledAt1.duration(to: clock.now), .seconds(1),
+                          "cancellation must finish before the five-second queue timeout")
+        XCTAssertEqual(resultAlias, .failed, "cancellation must return .failed")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0)
+
+        // 2. placementParameters(timeout:queueBound:) cancelled while registered
+        let callerTaskParams = Task {
+            await AttriKit.placementParameters(timeout: .seconds(5), queueBound: .seconds(5))
+        }
+        let registered2 = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 1
+        }
+        XCTAssertTrue(registered2, "waiter must be registered")
+        let cancelledAt2 = clock.now
+        callerTaskParams.cancel()
+        let resultParams = await callerTaskParams.value
+        XCTAssertLessThan(cancelledAt2.duration(to: clock.now), .seconds(1),
+                          "cancellation must finish before the five-second queue timeout")
+        XCTAssertTrue(resultParams.isEmpty, "cancelled placementParameters must return empty dictionary")
+        XCTAssertFalse(queueReleased.isSet, "queue must still be held")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0)
+
+        gate.release()
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        // The measurements below pass queueTimeout: nil, so each one first drains the facade queue
+        // in full -- the released gate operation, start()'s submit and its disk writes. Draining it
+        // HERE, with a call whose own elapsed time nothing asserts, is what makes the two bounds
+        // below measure the 40 ms deadline branch alone instead of the deadline plus an unbounded
+        // drain (which is what a 400 ms bound could not have held).
+        _ = await AttriKit.attribution(timeout: .zero)
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "the queue must be drained before the deadline is measured")
+
+        // 3. Real deadline expiration independently returns .timedOut and empty dictionary
+        let startTimeoutAttr = clock.now
+        let timeoutAttrResult = await AttriKit.attribution(timeout: .milliseconds(40))
+        let elapsedTimeoutAttr = clock.now - startTimeoutAttr
+        XCTAssertEqual(timeoutAttrResult, .timedOut, "deadline expiry must return .timedOut")
+        XCTAssertLessThan(elapsedTimeoutAttr, .milliseconds(400))
+
+        let startTimeoutParams = clock.now
+        let timeoutParamsResult = await AttriKit.placementParameters(timeout: .milliseconds(40))
+        let elapsedTimeoutParams = clock.now - startTimeoutParams
+        XCTAssertTrue(timeoutParamsResult.isEmpty, "deadline expiry placementParameters must be empty")
+        XCTAssertLessThan(elapsedTimeoutParams, .milliseconds(400))
+    }
+
+    func testBoundedDrainResumedByRuntimeReplacementExecutesAgainstNewRuntime() async {
+        let oldTransport = StubTransport { request, _ in
+            if request.httpMethod == "GET" {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_old_runtime","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: oldTransport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        // Ensure old runtime has resolved attribution
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let oldAttribution) = resolved else {
+            return XCTFail("Expected old runtime to resolve attribution, got \(resolved)")
+        }
+        XCTAssertEqual(oldAttribution.campaignID, "c_old_runtime")
+
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        let callerTask = Task {
+            await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .seconds(5))
+        }
+
+        let registered = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 1
+        }
+        XCTAssertTrue(registered, "waiter must be registered")
+
+        let newTransport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: newTransport))
+
+        let result = await callerTask.value
+        XCTAssertEqual(result, .notStarted, "resumed attribution must execute against the replaced new runtime (.notStarted), not the decommissioned old runtime (.attributed)")
+    }
+
+    func testNilBoundDrainResumedByRuntimeReplacementExecutesAgainstNewRuntime() async {
+        let oldTransport = StubTransport { request, _ in
+            if request.httpMethod == "GET" {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_old_runtime_nil","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: oldTransport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+
+        // Ensure old runtime has resolved attribution
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed(let oldAttribution) = resolved else {
+            return XCTFail("Expected old runtime to resolve attribution, got \(resolved)")
+        }
+        XCTAssertEqual(oldAttribution.campaignID, "c_old_runtime_nil")
+
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        let callerTask = Task {
+            await AttriKit.attribution(timeout: .seconds(2), queueTimeout: nil)
+        }
+        // Allow callerTask to enter withRuntime and suspend on await tail.value
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let newTransport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: newTransport))
+        gate.release()
+
+        let result = await callerTask.value
+        XCTAssertEqual(result, .notStarted, "resumed nil-bound attribution must execute against the replaced new runtime (.notStarted), not the decommissioned old runtime (.attributed)")
+    }
+
+    func testCompletedGenerationResumesOnce() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_resumes_once","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed = resolved else { return XCTFail("Expected attributed result") }
+
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        var tasks: [Task<AttributionResult, Never>] = []
+        for _ in 0..<5 {
+            tasks.append(Task {
+                await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .seconds(2))
+            })
+        }
+
+        let allRegistered = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 5
+        }
+        XCTAssertTrue(allRegistered, "all 5 waiters must be registered")
+
+        gate.release()
+
+        for task in tasks {
+            let result = await task.value
+            XCTAssertEqual(result, resolved)
+        }
+
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0)
+    }
+
+    func testLaterEnqueuesDoNotDelayCapturedGeneration() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_later_enqueues","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed = resolved else { return XCTFail("Expected attributed result") }
+
+        let gate1 = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate1.enter()
+        }
+        await gate1.waitStarted()
+
+        let callerTask = Task {
+            await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .seconds(2))
+        }
+
+        let waiterRegistered = await waitUntil {
+            AttriKit.registeredWaitersCountForTesting() == 1
+        }
+        XCTAssertTrue(waiterRegistered, "waiter must be registered for generation 1")
+
+        // Enqueue later work (generation 2) that blocks indefinitely
+        let gate2 = TestQueueGate()
+        let gen2Released = TestFlag()
+        AttriKit.enqueueForTesting { _ in
+            await gate2.enter()
+            gen2Released.set()
+        }
+
+        // Release generation 1
+        gate1.release()
+
+        // The caller task only captured generation 1; it must resume without waiting for generation 2
+        let result = await callerTask.value
+        XCTAssertEqual(result, resolved)
+        XCTAssertFalse(gen2Released.isSet, "later enqueued work must not delay earlier captured generation")
+
+        // Clean up generation 2
+        gate2.release()
+    }
+
+    func testCompletedGenerationWithZeroBoundSucceedsAndRefusesPending() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_zero_bound","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed = resolved else { return XCTFail("Expected attributed result") }
+
+        // 1. Pending work with zero bound refuses
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        let pendingAttr = await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .zero)
+        XCTAssertEqual(pendingAttr, .timedOut, "zero bound must refuse pending operations")
+
+        let pendingParams = await AttriKit.placementParameters(timeout: .seconds(2), queueTimeout: .zero)
+        XCTAssertTrue(pendingParams.isEmpty, "zero bound must refuse pending operations for placementParameters")
+
+        let pendingAlias = await AttriKit.attribution(timeout: .seconds(2), queueBound: .zero)
+        XCTAssertEqual(pendingAlias, .timedOut, "zero queueBound must refuse pending operations")
+
+        gate.release()
+
+        // Wait for the queue to drain completely
+        _ = await AttriKit.attribution(timeout: .seconds(2))
+
+        // 2. Completed queue with zero bound succeeds
+        let completedAttr = await AttriKit.attribution(timeout: .zero, queueTimeout: .zero)
+        XCTAssertEqual(completedAttr, resolved, "zero bound must succeed when queue generation is already completed")
+
+        let completedParams = await AttriKit.placementParameters(timeout: .zero, queueTimeout: .zero)
+        XCTAssertFalse(completedParams.isEmpty, "zero bound must succeed for placementParameters when completed")
+        XCTAssertEqual(completedParams["attrkit_campaign_id"], "c_zero_bound")
+
+        let completedAlias = await AttriKit.attribution(timeout: .zero, queueBound: .zero)
+        XCTAssertEqual(completedAlias, resolved, "zero queueBound must succeed when completed")
+    }
+
+    func testZeroQueueBoundRacesDrainedSnapshotToDrainCoordinatorZeroBranch() async {
+        let transport = StubTransport { request, count in
+            if request.httpMethod == "GET", count >= 2 {
+                return successResult(body: #"{"method":"deterministic","network":"apple_ads","campaign_id":"c_zero_branch","finality":"provisional","policy_version":1,"version":1}"#, headers: ["etag": "\"v1\""])
+            }
+            return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let resolved = await AttriKit.attribution(timeout: .seconds(2))
+        guard case .attributed = resolved else { return XCTFail("Expected attributed result") }
+
+        let gate = TestQueueGate()
+        AttriKit.enqueueForTesting { _ in
+            await gate.enter()
+        }
+        await gate.waitStarted()
+
+        let initialTimeouts = AttriKit.resolveTimeoutCountForTesting()
+
+        // With work held in the queue, withRuntime observes isDrained == false and calls drainGeneration.
+        // In DrainCoordinator.run, registerWaiter succeeds, entering the zero branch (timeout <= .zero)
+        // which resolves immediately via facade.resolveTimeout.
+        let pendingAttr = await AttriKit.attribution(timeout: .seconds(2), queueTimeout: .zero)
+        XCTAssertEqual(pendingAttr, .timedOut, "zero bound with pending queue must report timeout")
+        XCTAssertEqual(AttriKit.resolveTimeoutCountForTesting(), initialTimeouts + 1, "DrainCoordinator zero branch must resolve through facade.resolveTimeout")
+        XCTAssertEqual(AttriKit.registeredWaitersCountForTesting(), 0, "waiter must be cleanly resolved and removed")
+
+        gate.release()
+    }
+
+    func testRuntimeReplacementAwaitsInFlightOperationBeforeShutdown() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        let opGate = TestQueueGate()
+        let opFinished = TestFlag()
+
+        // withRuntime holds a lease on the CURRENT runtime for the whole call. Parking inside the
+        // operation is the interleaving F-13379 names: the caller is running against old.1, not
+        // suspended on the queue tail, so nothing else records that the runtime is still in use.
+        let opTask = Task {
+            await AttriKit.withRuntimeForTesting { _ in
+                await opGate.enter()
+                opFinished.set()
+            }
+        }
+        await opGate.waitStarted()
+
+        let replaceFinished = TestFlag()
+        let newTransport = StubTransport { _, _ in successResult() }
+        let replaceTask = Task {
+            await AttriKit.configureForTesting(makeTestConfiguration(transport: newTransport))
+            replaceFinished.set()
+        }
+
+        // replace() clears the tail and swaps the runtime under its own lock, so without
+        // awaitOperations it reaches old.1.shutdown() here, under a live operation.
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(opFinished.isSet, "precondition: the operation must still be parked in withRuntime")
+        XCTAssertFalse(replaceFinished.isSet, "replace must await the in-flight operation before shutting the runtime down")
+
+        opGate.release()
+        await opTask.value
+        XCTAssertTrue(opFinished.isSet, "operation must complete")
+
+        await replaceTask.value
+        XCTAssertTrue(replaceFinished.isSet, "replace must complete once the in-flight operation finishes")
+    }
+
+    func testConsumerCallShapesAndFunctionReferencesCompileAndRun() async {
+        let transport = StubTransport { _, _ in
+            successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+
+        // Old 1-arg function references (unambiguous resolution)
+        let oldAttrRef: (Duration) async -> AttributionResult = AttriKit.attribution(timeout:)
+        let oldParamsRef: (Duration) async -> [String: String] = AttriKit.placementParameters(timeout:)
+
+        // New 2-arg function references (unambiguous resolution)
+        let newAttrQueueTimeoutRef: (Duration, Duration?) async -> AttributionResult = AttriKit.attribution(timeout:queueTimeout:)
+        let newAttrQueueBoundRef: (Duration, Duration?) async -> AttributionResult = AttriKit.attribution(timeout:queueBound:)
+        let newParamsQueueTimeoutRef: (Duration, Duration?) async -> [String: String] = AttriKit.placementParameters(timeout:queueTimeout:)
+        let newParamsQueueBoundRef: (Duration, Duration?) async -> [String: String] = AttriKit.placementParameters(timeout:queueBound:)
+
+        // Direct zero-argument calls
+        let attrZeroArg = await AttriKit.attribution()
+        XCTAssertEqual(attrZeroArg, .notStarted)
+        let paramsZeroArg = await AttriKit.placementParameters()
+        XCTAssertTrue(paramsZeroArg.isEmpty)
+
+        // Direct one-argument calls
+        let attrOneArg = await AttriKit.attribution(timeout: .zero)
+        XCTAssertEqual(attrOneArg, .notStarted)
+        let paramsOneArg = await AttriKit.placementParameters(timeout: .zero)
+        XCTAssertTrue(paramsOneArg.isEmpty)
+
+        // Direct explicit nil calls
+        let attrExplicitNil = await AttriKit.attribution(timeout: .zero, queueTimeout: nil)
+        XCTAssertEqual(attrExplicitNil, .notStarted)
+        let attrExplicitNilOnly = await AttriKit.attribution(queueTimeout: nil)
+        XCTAssertEqual(attrExplicitNilOnly, .notStarted)
+        let paramsExplicitNil = await AttriKit.placementParameters(timeout: .zero, queueTimeout: nil)
+        XCTAssertTrue(paramsExplicitNil.isEmpty)
+        let paramsExplicitNilOnly = await AttriKit.placementParameters(queueTimeout: nil)
+        XCTAssertTrue(paramsExplicitNilOnly.isEmpty)
+
+        // Direct queueBound calls
+        let attrQueueBoundNil = await AttriKit.attribution(timeout: .zero, queueBound: nil)
+        XCTAssertEqual(attrQueueBoundNil, .notStarted)
+        let attrQueueBoundNilOnly = await AttriKit.attribution(queueBound: nil)
+        XCTAssertEqual(attrQueueBoundNilOnly, .notStarted)
+        let attrQueueBoundVal = await AttriKit.attribution(timeout: .zero, queueBound: .milliseconds(50))
+        XCTAssertEqual(attrQueueBoundVal, .notStarted)
+        let attrQueueBoundValOnly = await AttriKit.attribution(queueBound: .milliseconds(50))
+        XCTAssertEqual(attrQueueBoundValOnly, .notStarted)
+
+        let paramsQueueBoundNil = await AttriKit.placementParameters(timeout: .zero, queueBound: nil)
+        XCTAssertTrue(paramsQueueBoundNil.isEmpty)
+        let paramsQueueBoundNilOnly = await AttriKit.placementParameters(queueBound: nil)
+        XCTAssertTrue(paramsQueueBoundNilOnly.isEmpty)
+        let paramsQueueBoundVal = await AttriKit.placementParameters(timeout: .zero, queueBound: .milliseconds(50))
+        XCTAssertTrue(paramsQueueBoundVal.isEmpty)
+        let paramsQueueBoundValOnly = await AttriKit.placementParameters(queueBound: .milliseconds(50))
+        XCTAssertTrue(paramsQueueBoundValOnly.isEmpty)
+
+        // Invocation through function references
+        let attrFromOldRef = await oldAttrRef(.zero)
+        XCTAssertEqual(attrFromOldRef, .notStarted)
+        let paramsFromOldRef = await oldParamsRef(.zero)
+        XCTAssertTrue(paramsFromOldRef.isEmpty)
+
+        let attrFromNewQueueTimeoutRef = await newAttrQueueTimeoutRef(.zero, nil)
+        XCTAssertEqual(attrFromNewQueueTimeoutRef, .notStarted)
+        let attrFromNewQueueBoundRef = await newAttrQueueBoundRef(.zero, nil)
+        XCTAssertEqual(attrFromNewQueueBoundRef, .notStarted)
+        let paramsFromNewQueueTimeoutRef = await newParamsQueueTimeoutRef(.zero, nil)
+        XCTAssertTrue(paramsFromNewQueueTimeoutRef.isEmpty)
+        let paramsFromNewQueueBoundRef = await newParamsQueueBoundRef(.zero, nil)
+        XCTAssertTrue(paramsFromNewQueueBoundRef.isEmpty)
     }
 
     /// `.failed` is TERMINAL for the process: nothing clears `attributionCache` until relaunch, so
@@ -984,7 +1863,8 @@ final class KeychainFallbackTests: XCTestCase {
         )
         XCTAssertFalse(first.localLineagePresent, "a keychain failure must never claim lineage")
 
-        let second = try await storage.initializeIdentities()
+        let secondStorage = SDKStorage(defaults: SDKStorage.Defaults(value: suite), keychain: keychain, directory: dir)
+        let second = try await secondStorage.initializeIdentities()
         XCTAssertEqual(first.installationID, second.installationID, "fallback identity must be stable across launches")
     }
 
@@ -1328,6 +2208,168 @@ extension AttriKitCoreTests {
             "the envelope declared a consent that forbids the idfa it carries: a 422 on the wire, then cached and replayed"
         )
     }
+
+    /// When discarding an unauthorized IDFA-carrying payload, persistedBody and storage are cleared.
+    /// If selectedFirstOpenBody is not reset alongside them, the subsequent concurrency fallback
+    /// re-selects selectedFirstOpenBody.body, transmitting the forbidden IDFA payload.
+    /// Verifies that when tracking consent is withdrawn, selectedFirstOpenBody holding an IDFA payload
+    /// is reset to nil and does not re-select the unauthorized payload.
+    func testUnauthorizedIdfaPayloadDiscardsSelectedFirstOpenBody() async throws {
+        let idfa = UUID(uuidString: "12121212-1212-4121-8121-121212121212")!
+        let transport = StubTransport { _, _ in successResult() }
+        let configuration = makeTestConfiguration(
+            transport: transport,
+            evidence: StubEvidence(),
+            deviceEvidence: DeviceEvidence(idfa: nil, idfv: nil)
+        )
+        let storage = configuration.storage
+        let runtime = CoreRuntime(configuration: configuration)
+        await runtime.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let initialSent = await waitUntil {
+            await transport.requests().contains { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+        }
+        XCTAssertTrue(initialSent, "precondition: initial first-open must finish before injecting state")
+        let identity = try await storage.initializeIdentities()
+
+        let idfaPayload = try JSONSerialization.data(withJSONObject: [
+            "installation_id": identity.installationID.uuidString.lowercased(),
+            "install_epoch_id": identity.installEpochID.uuidString.lowercased(),
+            "occurred_at": "2026-09-08T00:00:00.000Z",
+            "app_version": "1.0",
+            "coarse_context": [
+                "country_code": "CH",
+                "os_major": "16.4",
+                "device_class": "phone",
+                "locale": "en-CH"
+            ],
+            "consent": [
+                "state": "measurement_granted",
+                "policy_version": 1
+            ],
+            "idfa": idfa.uuidString.lowercased()
+        ])
+        // Ensure storage does not have a conflicting record from initial start
+        try await storage.setFirstOpenBody(nil, installEpochID: nil, consent: nil)
+
+        // Precondition: selectedFirstOpenBody holds an IDFA payload when tracking consent is withdrawn
+        await runtime.setSelectedFirstOpenBodyForTesting((
+            installEpochID: identity.installEpochID,
+            consent: .measurementGranted,
+            body: idfaPayload
+        ))
+
+        await runtime.submitFirstOpenForTesting()
+        await runtime.shutdown()
+
+        // 1. The transmitted payload on the wire must not re-select the forbidden IDFA payload
+        let requests = await transport.requests().filter {
+            $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+        }
+        let request = try XCTUnwrap(requests.last)
+        let body = try gunzipStored(XCTUnwrap(request.httpBody))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertNil(
+            json["idfa"],
+            "the transmitted first-open payload must not contain idfa after the unauthorized payload was discarded"
+        )
+
+        // 2. selectedFirstOpenBody must not retain the unauthorized IDFA payload
+        let selected = await runtime.selectedFirstOpenBodyForTesting()
+        if let selectedBody = selected?.body {
+            XCTAssertFalse(
+                CoreRuntime.bodyCarriesIdfa(selectedBody),
+                "selectedFirstOpenBody must not retain the unauthorized IDFA payload"
+            )
+        }
+    }
+
+    func testUnauthorizedIdfaPayloadResetsSelectedFirstOpenBodyToNilWhenConcurrentlyPersisted() async throws {
+        let idfa = UUID(uuidString: "12121212-1212-4121-8121-121212121212")!
+        let transport = StubTransport { _, _ in successResult() }
+        let cleanPayload = try JSONSerialization.data(withJSONObject: [
+            "installation_id": UUID().uuidString.lowercased(),
+            "install_epoch_id": UUID().uuidString.lowercased(),
+            "occurred_at": "2026-09-08T00:00:00.000Z",
+            "app_version": "1.0",
+            "coarse_context": [
+                "country_code": "CH",
+                "os_major": "16.4",
+                "device_class": "phone",
+                "locale": "en-CH"
+            ],
+            "consent": [
+                "state": "measurement_granted",
+                "policy_version": 1
+            ]
+        ])
+
+        final class StorageBox: @unchecked Sendable {
+            var storage: SDKStorage?
+        }
+        let box = StorageBox()
+        let evidence = ConcurrentStorageEvidence {
+            if let storage = box.storage, let id = try? await storage.initializeIdentities() {
+                try? await storage.setFirstOpenBody(
+                    cleanPayload,
+                    installEpochID: id.installEpochID,
+                    consent: .measurementGranted
+                )
+            }
+        }
+
+        let configuration = makeTestConfiguration(
+            transport: transport,
+            evidence: evidence,
+            deviceEvidence: DeviceEvidence(idfa: nil, idfv: nil)
+        )
+        box.storage = configuration.storage
+        let storage = configuration.storage
+        let runtime = CoreRuntime(configuration: configuration)
+        await runtime.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let initialSent = await waitUntil {
+            await transport.requests().contains { $0.url?.path.hasSuffix("/v1/ingest/first-open") == true }
+        }
+        XCTAssertTrue(initialSent, "precondition: initial first-open must finish before injecting state")
+        let identity = try await storage.initializeIdentities()
+
+        let idfaPayload = try JSONSerialization.data(withJSONObject: [
+            "installation_id": identity.installationID.uuidString.lowercased(),
+            "install_epoch_id": identity.installEpochID.uuidString.lowercased(),
+            "occurred_at": "2026-09-08T00:00:00.000Z",
+            "app_version": "1.0",
+            "coarse_context": [
+                "country_code": "CH",
+                "os_major": "16.4",
+                "device_class": "phone",
+                "locale": "en-CH"
+            ],
+            "consent": [
+                "state": "measurement_granted",
+                "policy_version": 1
+            ],
+            "idfa": idfa.uuidString.lowercased()
+        ])
+
+        // Ensure storage does not have a conflicting record from initial start
+        try await storage.setFirstOpenBody(nil, installEpochID: nil, consent: nil)
+
+        // Precondition: selectedFirstOpenBody holds an IDFA payload when tracking consent is withdrawn
+        await runtime.setSelectedFirstOpenBodyForTesting((
+            installEpochID: identity.installEpochID,
+            consent: .measurementGranted,
+            body: idfaPayload
+        ))
+
+        await runtime.submitFirstOpenForTesting()
+        await runtime.shutdown()
+
+        // When concurrent storage resolves the first-open body, selectedFirstOpenBody is reset to nil
+        let selected = await runtime.selectedFirstOpenBodyForTesting()
+        XCTAssertNil(
+            selected,
+            "selectedFirstOpenBody must be reset to nil after discarding unauthorized IDFA payload"
+        )
+    }
 }
 
 /// Evidence that parks `appTransactionJWS` until released, and reports when `coarseContext()` --
@@ -1335,11 +2377,16 @@ extension AttriKitCoreTests {
 final class ConsentWindowEvidence: PlatformEvidenceProviding, @unchecked Sendable {
     private let lock = NSLock()
     private var continuations: [CheckedContinuation<Void, Never>] = []
-    private var contextReads = 0
+    private var isReleased = false
 
     func appTransactionJWS() async -> String? {
         await withCheckedContinuation { continuation in
             lock.lock()
+            if isReleased {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
             continuations.append(continuation)
             lock.unlock()
         }
@@ -1349,10 +2396,7 @@ final class ConsentWindowEvidence: PlatformEvidenceProviding, @unchecked Sendabl
     func adServicesToken() async -> String? { nil }
 
     func coarseContext() -> CoarseContext {
-        lock.lock()
-        contextReads += 1
-        lock.unlock()
-        return CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
+        CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
     }
 
     func appVersion() -> String { "1.2.3 (42)" }
@@ -1360,14 +2404,174 @@ final class ConsentWindowEvidence: PlatformEvidenceProviding, @unchecked Sendabl
     var envelopeReachedEvidenceSuspension: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return contextReads > 0
+        return !continuations.isEmpty
     }
 
     func release() {
         lock.lock()
+        isReleased = true
         let pending = continuations
         continuations.removeAll()
         lock.unlock()
         for continuation in pending { continuation.resume() }
+    }
+}
+
+/// Evidence that executes an asynchronous closure during appTransactionJWS before returning nil,
+/// allowing simulated concurrent storage writes during first-open evidence collection.
+final class ConcurrentStorageEvidence: PlatformEvidenceProviding, @unchecked Sendable {
+    private let onEvidence: @Sendable () async -> Void
+
+    init(onEvidence: @escaping @Sendable () async -> Void) {
+        self.onEvidence = onEvidence
+    }
+
+    func appTransactionJWS() async -> String? {
+        await onEvidence()
+        return nil
+    }
+
+    func adServicesToken() async -> String? { nil }
+
+    func coarseContext() -> CoarseContext {
+        CoarseContext(countryCode: "CH", osMajor: "16.4", deviceClass: "phone", locale: "en-CH")
+    }
+
+    func appVersion() -> String { "1.0" }
+}
+
+/// Gate used by deterministic tests to prove an enqueued operation has entered execution
+/// and hold it until explicitly released.
+final class TestQueueGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startedContinuations: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+    private var hasStarted = false
+    private var isReleased = false
+
+    func enter() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                lock.lock()
+                if isReleased {
+                    hasStarted = true
+                    let started = startedContinuations
+                    startedContinuations.removeAll()
+                    lock.unlock()
+                    for s in started { s.resume() }
+                    cont.resume()
+                    return
+                }
+                releaseContinuations.append(cont)
+                hasStarted = true
+                let started = startedContinuations
+                startedContinuations.removeAll()
+                lock.unlock()
+                for s in started { s.resume() }
+            }
+        } onCancel: {
+            release()
+        }
+    }
+
+    func waitStarted() async {
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if hasStarted {
+                lock.unlock()
+                cont.resume()
+                return
+            }
+            startedContinuations.append(cont)
+            lock.unlock()
+        }
+    }
+
+    func release() {
+        lock.lock()
+        isReleased = true
+        hasStarted = true
+        let toRelease = releaseContinuations
+        releaseContinuations.removeAll()
+        let toStart = startedContinuations
+        startedContinuations.removeAll()
+        lock.unlock()
+        for r in toRelease { r.resume() }
+        for s in toStart { s.resume() }
+    }
+}
+
+final class TestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+
+    func set() {
+        lock.lock()
+        flag = true
+        lock.unlock()
+    }
+}
+
+final class TestPollCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
+    }
+}
+
+
+// MARK: - Consumer Compile Verification
+
+/// Ordinary import-only consumer compile declarations verifying that old function references,
+/// new two-argument references, and direct zero-argument / one-argument / explicit nil / queueBound
+/// call shapes compile unambiguously.
+private enum ConsumerCompileDeclarations {
+    static func verifyFunctionReferences() {
+        // Old 1-argument function references
+        let _: (Duration) async -> AttributionResult = AttriKit.attribution(timeout:)
+        let _: (Duration) async -> [String: String] = AttriKit.placementParameters(timeout:)
+
+        // New 2-argument function references
+        let _: (Duration, Duration?) async -> AttributionResult = AttriKit.attribution(timeout:queueTimeout:)
+        let _: (Duration, Duration?) async -> AttributionResult = AttriKit.attribution(timeout:queueBound:)
+        let _: (Duration, Duration?) async -> [String: String] = AttriKit.placementParameters(timeout:queueTimeout:)
+        let _: (Duration, Duration?) async -> [String: String] = AttriKit.placementParameters(timeout:queueBound:)
+    }
+
+    static func verifyCallShapes() async {
+        // Direct zero-argument calls
+        _ = await AttriKit.attribution()
+        _ = await AttriKit.placementParameters()
+
+        // Direct one-argument calls
+        _ = await AttriKit.attribution(timeout: .seconds(2))
+        _ = await AttriKit.placementParameters(timeout: .seconds(2))
+
+        // Direct explicit nil calls
+        _ = await AttriKit.attribution(timeout: .seconds(2), queueTimeout: nil)
+        _ = await AttriKit.attribution(queueTimeout: nil)
+        _ = await AttriKit.placementParameters(timeout: .seconds(2), queueTimeout: nil)
+        _ = await AttriKit.placementParameters(queueTimeout: nil)
+
+        // Direct queueBound calls
+        _ = await AttriKit.attribution(timeout: .seconds(2), queueBound: nil)
+        _ = await AttriKit.attribution(queueBound: nil)
+        _ = await AttriKit.attribution(timeout: .seconds(2), queueBound: .seconds(1))
+        _ = await AttriKit.attribution(queueBound: .seconds(1))
+        _ = await AttriKit.placementParameters(timeout: .seconds(2), queueBound: nil)
+        _ = await AttriKit.placementParameters(queueBound: nil)
+        _ = await AttriKit.placementParameters(timeout: .seconds(2), queueBound: .seconds(1))
+        _ = await AttriKit.placementParameters(queueBound: .seconds(1))
     }
 }

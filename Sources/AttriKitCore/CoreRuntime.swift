@@ -210,6 +210,10 @@ actor CoreRuntime {
     /// CURRENT user id, funnel identity, token and device evidence, so one replay after
     /// registration carries everything the intermediate calls would have.
     private var deferredIdentify = false
+    /// The deferred re-fire is a detached job whose result nothing reads, so there was no handle on
+    /// it at all -- and therefore no way for anything, a test included, to be ordered after the
+    /// spend decision it makes. Retained purely so that ordering is expressible.
+    private var identifyTask: Task<Void, Never>?
     private var attributionETag: String?
     private var sessionTrackingEnabled = true
     private var lifecycleObservationStarted = false
@@ -680,20 +684,24 @@ actor CoreRuntime {
     }
 
     func setUserID(_ opaqueID: String?) async {
-        let sanitized = opaqueID.flatMap { value -> String? in
-            guard !value.isEmpty, value.utf8.count <= 256,
-                  !value.contains("@") else { return nil }
-            return value
-        }
-        if opaqueID != nil, sanitized == nil {
-            // A REFUSED id is not a logout. Mapping it to nil and persisting that erased an id set
-            // earlier and re-submitted identify with no user, so a bad value silently DESTROYED the
-            // RevenueCat join key instead of being rejected. The published contract says rejected
-            // (apps/web/components/marketing/content.ts, "Identify users"); nil still clears.
-            configuration.diagnostic(
-                "AttriKit: setUserID(_:) refused an id that is empty, longer than 256 UTF-8 bytes, or contains '@'. The id already set is unchanged; pass nil explicitly to clear it."
-            )
-            return
+        let sanitized: String?
+        if let value = opaqueID {
+            if value.isEmpty {
+                // Historical clearing on the compatible line: setUserID("") is preserved as a logout
+                // idiom and clears the stored ID, identical to setUserID(nil).
+                sanitized = nil
+            } else if value.utf8.count <= 256 && !value.contains("@") {
+                sanitized = value
+            } else {
+                // A non-empty INVALID value must not clear a valid id. Mapping it to nil previously erased
+                // an id set earlier and destroyed the RevenueCat join key instead of being rejected.
+                configuration.diagnostic(
+                    "AttriKit: setUserID(_:) refused an id that is longer than 256 UTF-8 bytes or contains '@'. The id already set is unchanged; pass nil or \"\" explicitly to clear it."
+                )
+                return
+            }
+        } else {
+            sanitized = nil
         }
         pendingUserID = sanitized
         guard consent.allowsMeasurement, !deletionPending else { return }
@@ -745,6 +753,7 @@ actor CoreRuntime {
         queueTask = nil
         consentReceiptTask = nil
         attributionCache = nil
+        attributionETag = nil
         exactToken = nil
         funnelIdentity = FunnelIdentity()
         bufferedBeforeStart.removeAll()
@@ -908,6 +917,7 @@ actor CoreRuntime {
         // consent while carrying an advertising identifier that consent does not allow.
         if let stored = persistedBody, !consent.allowsTracking, Self.bodyCarriesIdfa(stored) {
             persistedBody = nil
+            selectedFirstOpenBody = nil
             try? await configuration.storage.setFirstOpenBody(
                 nil,
                 installEpochID: nil,
@@ -1255,6 +1265,14 @@ actor CoreRuntime {
             case 200:
                 let decoded = try attriKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
                 attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+                // Retained only AFTER the body was applied. Stored before the decode, a 200 whose body
+                // fails to parse threw to `catch` with the ETag kept: the next poll's If-None-Match then
+                // earned a 304, which falls to `default: break`, so the cache stayed nil for the rest of
+                // the session and attribution(timeout:) answered .timedOut against a server that had a
+                // match. A throw above skips this line, so a body we never applied leaves no validator.
+                // Stored inside case 200 so non-200 responses (e.g. 202 pending) that return an ETag
+                // do not store a validator that stalls subsequent polls on 304.
+                if let etag = response.headers["etag"] { attributionETag = etag }
             case 204:
                 attributionCache = .unattributed
             // `.failed` is a TERMINAL answer for this process: nothing clears the cache until the
@@ -1278,12 +1296,6 @@ actor CoreRuntime {
             default:
                 break
             }
-            // Retained only AFTER the body was applied. Stored before the decode, a 200 whose body
-            // fails to parse threw to `catch` with the ETag kept: the next poll's If-None-Match then
-            // earned a 304, which falls to `default: break`, so the cache stayed nil for the rest of
-            // the session and attribution(timeout:) answered .timedOut against a server that had a
-            // match. A throw above skips this line, so a body we never applied leaves no validator.
-            if let etag = response.headers["etag"] { attributionETag = etag }
             return Self.retryAfterMilliseconds(response.headers["retry-after"])
         } catch {}
         return nil
@@ -1324,7 +1336,7 @@ actor CoreRuntime {
         // when a userID was pending, producing two posts with different idempotency keys.
         if deferredIdentify || pendingUserID != nil {
             deferredIdentify = false
-            Task { await self.submitIdentify() }
+            identifyTask = Task { await self.submitIdentify() }
         }
         scheduleQueueFlush()
     }
@@ -1690,6 +1702,7 @@ actor CoreRuntime {
         queueTask = nil
         consentReceiptTask = nil
         attributionCache = nil
+        attributionETag = nil
         identity = nil
         sessionID = UUID()
         bufferedBeforeStart.removeAll()
@@ -1746,6 +1759,44 @@ actor CoreRuntime {
     }
 }
 
+#if DEBUG
+extension CoreRuntime {
+    func setSelectedFirstOpenBodyForTesting(_ value: (installEpochID: UUID, consent: AttriKitConsent, body: Data)?) {
+        selectedFirstOpenBody = value
+    }
+
+    func selectedFirstOpenBodyForTesting() -> (installEpochID: UUID, consent: AttriKitConsent, body: Data)? {
+        selectedFirstOpenBody
+    }
+
+    func submitFirstOpenForTesting() async {
+        await submitFirstOpen()
+    }
+
+    func joinIdentifyForTesting() async {
+        _ = await identifyTask?.value
+    }
+
+    static func encodedConsentReceiptForTesting(
+        installationID: UUID,
+        installEpochID: UUID,
+        scope: String,
+        consentState: AttriKitConsent,
+        policyVersion: Int = 1,
+        occurredAt: Date
+    ) throws -> Data {
+        let receipt = ConsentReceipt(
+            installationID: installationID,
+            installEpochID: installEpochID,
+            scope: scope,
+            consent: ConsentPayload(state: consentState, policyVersion: policyVersion),
+            occurredAt: occurredAt
+        )
+        return try attriKitJSONEncoder().encode(receipt)
+    }
+}
+#endif
+
 private struct ConsentReceipt: Codable {
     let installationID: UUID
     let installEpochID: UUID
@@ -1762,3 +1813,4 @@ private struct ConsentReceipt: Codable {
         case source
     }
 }
+
