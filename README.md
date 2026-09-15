@@ -114,7 +114,7 @@ accepted but matching is still pending, the attribution poll is bounded the same
 250ms to a 5-second ceiling for the first minute, then follows that same ladder, waits at least as
 long as a `Retry-After` header asks (clamped to six hours), and once the schedule is exhausted or the
 ~24h window closes it stops and leaves the result UNKNOWN: `attribution(timeout:)` answers
-`.timedOut`, never `.unattributed`. Exhaustion means AttrKit stopped asking, not that the install
+`.timedOut`, never `.unattributed`. Exhaustion means AttriKit stopped asking, not that the install
 had no attribution, and the answer is cached for the process lifetime, so claiming the stronger of
 the two would make a match that had simply not landed yet permanently wrong. Event batches
 flush immediately after enqueue, retrying with backoff starting at one second and
@@ -159,7 +159,7 @@ Superwall.shared.register(placement: "onboarding_paywall", params: parameters)
 
 The dictionary can contain `attrkit_method`, `attrkit_network`, `attrkit_campaign_id`, and
 `attrkit_source_type`. It is empty for unresolved, organic, device-matched, modeled, or otherwise
-non-deterministic attribution. AttrKit never turns a probabilistic campaign estimate into a
+non-deterministic attribution. AttriKit never turns a probabilistic campaign estimate into a
 user-level paywall decision.
 
 ## App Tracking Transparency (optional)
@@ -201,13 +201,16 @@ payloads. If core measurement was already started, the resolved identifiers are
 forwarded in an identify payload instead. On macOS, ATT is unavailable and
 `requestConsent()` returns `.unknown`.
 
-The tracking module's privacy manifest has an empty `NSPrivacyTrackingDomains` array
-because the SDK cannot know the runtime `AttriKitEndpoint`. If the host sends IDFA to
-AttriKit, the **host app must declare the actual ingest domain in its own privacy
-manifest's `NSPrivacyTrackingDomains`**. As an alternative, a distribution that fixes the
-SDK to one ingest endpoint can declare that fixed domain in its customized module
-manifest. AttriKit still gates IDFA access on ATT authorization; the host declaration is
-an additional App Store privacy requirement, not a replacement for that runtime gate.
+The tracking and link-token module manifests carry no `NSPrivacyTracking` and no
+`NSPrivacyTrackingDomains` key, because the SDK cannot know the runtime `AttriKitEndpoint`
+and Apple's TN3181 rejects a manifest that declares tracking with an empty domain list.
+Their collected data types still carry the tracking flag. If the host sends IDFA to
+AttriKit, the **host app must declare `NSPrivacyTracking` and the actual ingest domain in
+its own privacy manifest's `NSPrivacyTrackingDomains`**. As an alternative, a distribution
+that fixes the SDK to one ingest endpoint can declare both keys with that fixed domain in
+its customized module manifest. AttriKit still gates IDFA access on ATT authorization; the
+host declaration is an additional App Store privacy requirement, not a replacement for that
+runtime gate.
 
 ## Revocation and deletion identity
 

@@ -35,18 +35,13 @@
 			<true/>
 		</dict>
 	</array>
-	<key>NSPrivacyTracking</key>
-	<true/>
-	<key>NSPrivacyTrackingDomains</key>
-	<!-- MUST stay empty, and this comment is the reason: iOS BLOCKS every network request to a
-	     domain listed here whenever App Tracking Transparency is not authorized. attrikit.io is the
-	     single ingest host for first-open, event batches, identify, consent receipts AND
-	     /v1/privacy/delete, so naming it here does not restrict tracking — it silently disables
-	     measurement, and erasure, for every user who declines the ATT prompt. That is most users.
-	     The host configures the endpoint at runtime, so this module cannot know the domain anyway;
-	     a host that sends IDFA declares its own ingest domain in the HOST app's manifest, and
-	     accepts that those requests stop without ATT. Removed once and shipped in 2.2.0; restored
-	     here with the reason attached so the next reader does not remove it again. -->
-	<array/>
+	<!-- No NSPrivacyTracking and no NSPrivacyTrackingDomains, on purpose. Apple TN3181 lists
+	     "NSPrivacyTracking true with an empty NSPrivacyTrackingDomains" as an INVALID manifest
+	     (the shape this file carried until 2026-09-15), and gives the shape for an SDK that
+	     connects to no tracking domain of its own: remove both keys. This module cannot name a
+	     domain because the host configures the ingest endpoint at runtime, and naming attrikit.io
+	     would make iOS block every request to it, including erasure, for users who decline ATT
+	     (shipped in 2.2.0, reverted in 2.2.1). The data types above still carry their tracking
+	     flags; the HOST app declares NSPrivacyTracking and its own ingest domain. -->
 </dict>
 </plist>

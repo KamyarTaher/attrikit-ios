@@ -6,7 +6,7 @@ import XCTest
 final class SessionTrackingTests: XCTestCase {
     private let apiKey = String(repeating: "k", count: 20)
 
-    func testLifecycleNotificationDeliveryUsesAsyncBoundedBackgroundLeaseStructure() throws {
+    func testLifecycleNotificationDeliveryUsesAsyncBoundedBackgroundLeaseStructure() async throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../../Sources/AttriKitCore/SessionLifecycle.swift")
@@ -51,6 +51,62 @@ final class SessionTrackingTests: XCTestCase {
         // The post instant travels with the event. Timestamping at processing time charged the
         // serialized delivery wait to the user's session.
         XCTAssertTrue(backgroundDelivery.contains("await handler(event, occurredAt)"))
+
+        // Behavioral execution: verify handler execution occurs asynchronously and non-blocking
+        let deliveries = LifecycleEventRecorder()
+        let observer = ApplicationLifecycleObserver(applicationIsActive: { true })
+        let startMoment = Date()
+        observer.start { event, occurredAt in
+            // Suspend briefly to verify that asynchronous execution does not block the observer
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            await deliveries.record(event, occurredAt: occurredAt)
+        }
+        let elapsed = Date().timeIntervalSince(startMoment)
+        XCTAssertLessThan(elapsed, 0.5, "observer.start must return promptly without blocking synchronously on the async handler")
+
+        let delivered = await waitUntil(timeout: .seconds(2)) {
+            await deliveries.count() == 1
+        }
+        XCTAssertTrue(delivered, "asynchronous handler must execute and deliver the lifecycle event")
+        let snapshot = await deliveries.snapshot()
+        XCTAssertEqual(snapshot.count, 1)
+        XCTAssertTrue(snapshot.firstIsDidBecomeActive)
+        XCTAssertNotNil(snapshot.firstOccurredAt)
+
+        #if canImport(UIKit) && os(iOS)
+        // Behavioral execution: verify background lease delivery for willResignActive and willTerminate
+        let postMoment = Date()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        let postElapsed = Date().timeIntervalSince(postMoment)
+        XCTAssertLessThan(postElapsed, 0.5, "willResignActive notification post must return promptly without blocking on the async handler")
+
+        let resignDelivered = await waitUntil(timeout: .seconds(2)) {
+            await deliveries.count() == 2
+        }
+        XCTAssertTrue(resignDelivered, "willResignActive notification must be delivered through the background lease pipeline")
+
+        NotificationCenter.default.post(name: UIApplication.willTerminateNotification, object: nil)
+        let terminateDelivered = await waitUntil(timeout: .seconds(2)) {
+            await deliveries.count() == 3
+        }
+        XCTAssertTrue(terminateDelivered, "willTerminate notification must be delivered through the background lease pipeline")
+
+        let allEvents = await deliveries.allEvents()
+        XCTAssertEqual(allEvents.count, 3)
+        XCTAssertEqual(allEvents[0].0, .didBecomeActive)
+        XCTAssertEqual(allEvents[1].0, .willResignActive)
+        XCTAssertEqual(allEvents[2].0, .willTerminate)
+        #endif
+
+        observer.stop()
+
+        #if canImport(UIKit) && os(iOS)
+        // Post again after stop() to verify that stopped observer unregisters and drops notifications
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let countAfterStop = await deliveries.count()
+        XCTAssertEqual(countAfterStop, 3, "stopped observer must unregister and not deliver notifications")
+        #endif
     }
 
     func testSessionDecoderReportsEveryMalformedBatchInsteadOfTreatingItAsNoEvents() async throws {
@@ -986,6 +1042,8 @@ private actor LifecycleEventRecorder {
     }
 
     func count() -> Int { events.count }
+
+    func allEvents() -> [(ApplicationLifecycleEvent, Date?)] { events }
 
     func snapshot() -> (count: Int, firstIsDidBecomeActive: Bool, firstOccurredAt: Date?) {
         guard let first = events.first else { return (0, false, nil) }

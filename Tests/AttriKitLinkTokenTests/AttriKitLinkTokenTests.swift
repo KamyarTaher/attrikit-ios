@@ -237,15 +237,15 @@ final class AttriKitLinkTokenTests: XCTestCase {
         // This module reads the pasteboard only when consent.allowsTracking is already true
         // (CoreRuntime.canReadLinkTokenPasteboard), and the token it recovers links an install to
         // a click that happened on another company's property. That is Apple's definition of
-        // tracking, so the manifest declares it. The DOMAIN, however, stays out of it:
-        // MUST be empty. iOS blocks every request to a domain listed here when App Tracking
-        // Transparency is not authorized, and attrikit.io is the single ingest host for first-open,
-        // events, identify, consent receipts and /v1/privacy/delete — so naming it disables
-        // measurement and erasure for every user who declines the prompt. The host configures the
-        // endpoint at runtime and declares its own domain. Listing it here shipped in 2.2.0 and was
-        // reverted in 2.2.1; this assertion is what stops it coming back.
-        XCTAssertEqual(plist["NSPrivacyTracking"] as? Bool, true)
-        XCTAssertEqual(plist["NSPrivacyTrackingDomains"] as? [String], [])
+        // tracking, and the data type below declares it. The two TOP-LEVEL keys stay out: Apple
+        // TN3181 lists NSPrivacyTracking=true with an empty NSPrivacyTrackingDomains as an invalid
+        // manifest (the shape shipped until 2026-09-15), and the module cannot name a domain. The
+        // host configures the endpoint at runtime, and naming attrikit.io makes iOS block every
+        // request to it, erasure included, for users who decline ATT (shipped in 2.2.0, reverted
+        // in 2.2.1). So the host app declares NSPrivacyTracking and its own domain, and these two
+        // assertions stop either key coming back here.
+        XCTAssertNil(plist["NSPrivacyTracking"])
+        XCTAssertNil(plist["NSPrivacyTrackingDomains"])
         let types = try XCTUnwrap(plist["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
         let other = try XCTUnwrap(types.first { ($0["NSPrivacyCollectedDataType"] as? String) == "NSPrivacyCollectedDataTypeOtherDataTypes" })
         // The link token itself is the value that crosses the property boundary.

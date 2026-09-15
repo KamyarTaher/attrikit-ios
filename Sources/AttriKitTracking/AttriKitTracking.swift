@@ -22,10 +22,13 @@ import UIKit
 /// ```
 ///
 /// Because the ingest endpoint is configured by the host at runtime, this module cannot
-/// name that endpoint in its own privacy manifest. A host that sends IDFA to AttriKit must
-/// add its actual ingest domain to `NSPrivacyTrackingDomains` in the host app's privacy
-/// manifest. Hosts that require a module-owned declaration can instead ship a fixed ingest
-/// endpoint and declare that fixed domain in a customized tracking-module manifest.
+/// name that endpoint in its own privacy manifest, and Apple's TN3181 rejects a manifest
+/// that sets `NSPrivacyTracking` with an empty domain list, so the module manifest carries
+/// neither key (its Device ID entry keeps the tracking flag). A host that sends IDFA to
+/// AttriKit must set `NSPrivacyTracking` and add its actual ingest domain to
+/// `NSPrivacyTrackingDomains` in the host app's privacy manifest. Hosts that require a
+/// module-owned declaration can instead ship a fixed ingest endpoint and declare both keys
+/// with that fixed domain in a customized tracking-module manifest.
 public enum AttriKitTracking {
     private static let systems = TrackingSystemRegistry()
     private static let applicationActivations = ApplicationActivationRegistry()
