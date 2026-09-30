@@ -218,6 +218,7 @@ actor SDKStorage {
         static let consentReceipts = "io.attrikit.consent-receipts"
         static let appleAdsTokenFunnel = "io.attrikit.apple-ads-token-funnel"
         static let conversionValues = "io.attrikit.conversion-values"
+        static let manualDMAConsent = "io.attrikit.manual-dma-consent"
     }
 
     private static let maxConsumedTokens = 128
@@ -511,6 +512,20 @@ actor SDKStorage {
               let funnel = try? attriKitJSONDecoder().decode(AppleAdsTokenFunnel.self, from: stored),
               funnel.installEpochID == installEpochID else { return nil }
         return funnel
+    }
+
+    /// Google's DMA values as the app set them explicitly; they win over the TCF keys until cleared.
+    func manualDMAConsent() -> DMAConsent? {
+        guard let stored = defaultsBox.value.data(forKey: Key.manualDMAConsent) else { return nil }
+        return try? attriKitJSONDecoder().decode(DMAConsent.self, from: stored)
+    }
+
+    func setManualDMAConsent(_ value: DMAConsent?) throws {
+        if let value {
+            defaultsBox.value.set(try attriKitJSONEncoder().encode(value), forKey: Key.manualDMAConsent)
+        } else {
+            defaultsBox.value.removeObject(forKey: Key.manualDMAConsent)
+        }
     }
 
     func conversionValueState() -> ConversionValueState? {
@@ -832,6 +847,7 @@ actor SDKStorage {
         defaultsBox.value.removeObject(forKey: Key.firstOpenBody)
         defaultsBox.value.removeObject(forKey: Key.appleAdsTokenFunnel)
         defaultsBox.value.removeObject(forKey: Key.conversionValues)
+        defaultsBox.value.removeObject(forKey: Key.manualDMAConsent)
         if let firstError { throw firstError }
     }
 

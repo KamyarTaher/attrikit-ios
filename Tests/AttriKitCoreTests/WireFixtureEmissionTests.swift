@@ -180,6 +180,56 @@ final class WireFixtureEmissionTests: XCTestCase {
         try assertEmissionMatchesFixture(payload: batch, filename: "event-batch-standard.json")
     }
 
+    /// consent.dma as a TCF-derived EU user sends it: data granted, personalization denied.
+    func testEmitEventBatchDMA() throws {
+        let event = EventEnvelope(
+            eventID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-000000000004")!,
+            eventName: "trial_started",
+            eventVersion: 1,
+            occurredAt: Date(timeIntervalSince1970: 1_780_000_000),
+            sentAt: Date(timeIntervalSince1970: 1_780_000_001),
+            installationID: UUID(uuidString: "c0ffee00-1111-4111-8111-111111111111")!,
+            installEpochID: UUID(uuidString: "c0ffee00-2222-4222-8222-222222222222")!,
+            sessionID: UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-000000000004")!,
+            consent: EventConsent(
+                measurement: "granted",
+                tracking: "unknown",
+                policyVersion: 1,
+                dma: DMAConsent(eea: true, adUserData: true, adPersonalization: false, source: .tcf)
+            ),
+            properties: [:]
+        )
+        try assertEmissionMatchesFixture(
+            payload: EventBatch(batchID: "01900000-0000-7000-8000-000000000004", events: [event]),
+            filename: "event-batch-dma.json"
+        )
+    }
+
+    /// First-open with the explicit values an app set; outside the EEA, so no ad flags.
+    func testEmitFirstOpenDMA() throws {
+        let envelope = FirstOpenEnvelope(
+            installationID: UUID(uuidString: "c0ffee00-1111-4111-8111-111111111111")!,
+            installEpochID: UUID(uuidString: "c0ffee00-2222-4222-8222-222222222222")!,
+            occurredAt: Date(timeIntervalSince1970: 1_780_000_000),
+            appVersion: "2.6.0",
+            coarseContext: CoarseContext(countryCode: "US", osMajor: "18.0", deviceClass: "phone", locale: "en-US"),
+            consent: ConsentPayload(
+                state: .measurementGranted,
+                policyVersion: 1,
+                dma: DMAConsent(eea: false, adUserData: nil, adPersonalization: nil, source: .manual)
+            ),
+            appTransactionJWS: nil,
+            asaToken: nil,
+            exactTokenReference: nil,
+            webFirstParty: nil,
+            idfa: nil,
+            idfv: nil,
+            localLineagePresent: false,
+            localEpochPresent: false
+        )
+        try assertEmissionMatchesFixture(payload: envelope, filename: "first-open-dma.json")
+    }
+
     func testEmitEventBatchMinimal() throws {
         let event = EventEnvelope(
             eventID: UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-000000000002")!,

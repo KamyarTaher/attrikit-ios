@@ -1,14 +1,39 @@
 import Foundation
 
-let attriKitSDKVersion = "2.5.0"
+let attriKitSDKVersion = "2.6.0"
 
 struct ConsentPayload: Codable, Sendable {
     let state: AttriKitConsent
     let policyVersion: Int
+    /// First-open only; a consent receipt leaves it nil, and nil is omitted from the JSON.
+    var dma: DMAConsent? = nil
 
     enum CodingKeys: String, CodingKey {
         case state
         case policyVersion = "policy_version"
+        case dma
+    }
+}
+
+/// Google's three DMA values (`consent.dma` on the wire, packages/shared `dmaConsentSchema`): read
+/// from the IAB TCF keys a consent management platform stored, or set by the app. An ad flag is
+/// nil when there is nothing to say, and nil is omitted from the JSON.
+struct DMAConsent: Codable, Equatable, Sendable {
+    enum Source: String, Codable, Sendable {
+        case tcf
+        case manual
+    }
+
+    let eea: Bool
+    let adUserData: Bool?
+    let adPersonalization: Bool?
+    let source: Source
+
+    enum CodingKeys: String, CodingKey {
+        case eea
+        case adUserData = "ad_user_data"
+        case adPersonalization = "ad_personalization"
+        case source
     }
 }
 
@@ -155,10 +180,14 @@ struct EventConsent: Codable, Sendable {
     let measurement: String
     let tracking: String
     let policyVersion: Int
+    /// Optional on the wire and in the stored queue: an event queued by an earlier version decodes
+    /// with nil, and nil is omitted from the JSON.
+    var dma: DMAConsent? = nil
 
     enum CodingKeys: String, CodingKey {
         case measurement, tracking
         case policyVersion = "policy_version"
+        case dma
     }
 }
 

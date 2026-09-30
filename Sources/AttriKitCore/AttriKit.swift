@@ -57,6 +57,28 @@ public enum AttriKit {
         facade.enqueue { core in await core.setConsent(consent) }
     }
 
+    /// The user's answers to Google's EU consent questions: whether EEA, UK or Swiss rules apply
+    /// to them, and their `ad_user_data` and `ad_personalization` consents. Google requires these
+    /// for every user in those regions. They go to Google with every event from now on, win over
+    /// the IAB TCF consent AttriKit otherwise reads, and are kept across launches until
+    /// `clearGoogleConsent()`. AttriKit's own consent (`setConsent`) is separate and unchanged.
+    public static func setGoogleConsent(eea: Bool, adUserData: Bool, adPersonalization: Bool) {
+        let values = DMAConsent(eea: eea, adUserData: adUserData, adPersonalization: adPersonalization, source: .manual)
+        facade.enqueue { core in await core.setManualDMAConsent(values) }
+    }
+
+    /// Forgets the values set with `setGoogleConsent`, so the IAB TCF consent applies again.
+    public static func clearGoogleConsent() {
+        facade.enqueue { core in await core.setManualDMAConsent(nil) }
+    }
+
+    /// AttriKit reads the IAB TCF consent your consent management platform stores on the device
+    /// (the standard `IABTCF_` keys) and passes Google the answers it gives. Pass `false` before
+    /// `start` to stop reading it.
+    public static func setTCFDataCollectionEnabled(_ enabled: Bool) {
+        facade.enqueue { core in await core.setTCFConsentReading(enabled) }
+    }
+
     /// Enables or disables automatic foreground-session measurement.
     ///
     /// Session tracking is enabled by default. Disable it before `start` to prevent

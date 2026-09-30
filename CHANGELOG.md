@@ -1,5 +1,33 @@
 # AttriKit for iOS: changes
 
+## 2.6.0 (2026-10-01)
+
+### Added
+
+- Google's EU consent values for users in the EEA, the UK and Switzerland. AttriKit reads the IAB
+  TCF consent a consent management platform stores on the device (`IABTCF_` keys in standard
+  `UserDefaults`) and sends Google, with each event and with first-open, whether EU rules apply
+  and the user's `ad_user_data` and `ad_personalization` consents, each on its own. Before, both
+  followed AttriKit's tracking consent, so an EU user who never granted tracking reached Google
+  as `ad_user_data=0`. Nothing is sent when no consent platform has stored `IABTCF_gdprApplies`,
+  or when it holds anything but 0 or 1. The publisher's TCF restrictions on Google (vendor 755)
+  apply before its consents are read, as the TCF requires of every vendor.
+- `AttriKit.setGoogleConsent(eea:adUserData:adPersonalization:)` and
+  `AttriKit.clearGoogleConsent()`: set the three answers yourself. They take precedence over TCF
+  and are kept across launches until cleared.
+- `AttriKit.setTCFDataCollectionEnabled(_:)`: pass `false` before `start` to stop reading the TCF
+  keys.
+
+### Changed (read before upgrading)
+
+- Events and first-open may carry an optional `consent.dma` object. The AttriKit server accepts it
+  from the release that ships with this version; no field was removed or renamed.
+
+### Unchanged
+
+- `AttriKit.setConsent` and everything it governs: the Google answers only go to Google.
+- The privacy manifests: reading the TCF keys collects no new data type.
+
 ## 2.5.0 (2026-09-30)
 
 ### Added

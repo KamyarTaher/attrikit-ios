@@ -209,7 +209,8 @@ func makeTestConfiguration(
     now: @escaping @Sendable () -> Date = { Date() },
     lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver(),
     diagnostic: @escaping @Sendable (String) -> Void = { _ in },
-    attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+    tcfDefaults: UserDefaults? = nil
 ) -> AttriKitTestingConfiguration {
     let suite = defaults ?? UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
     let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
@@ -222,7 +223,8 @@ func makeTestConfiguration(
         now: now,
         lifecycle: lifecycle,
         diagnostic: diagnostic,
-        attributionPollSleep: attributionPollSleep
+        attributionPollSleep: attributionPollSleep,
+        tcfDefaults: .init(value: tcfDefaults ?? UserDefaults(suiteName: "AttriKitTests.tcf.\(UUID())")!)
     )
 }
 

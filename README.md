@@ -288,6 +288,28 @@ go up, and the window locks at the top bucket. Do not call SKAdNetwork or AdAttr
 APIs yourself: a second writer overwrites these values, and the postback decodes against the wrong
 schema. The update goes through SKAdNetwork, which Apple mirrors into AdAttributionKit.
 
+## EU consent for Google (EEA, UK, Switzerland)
+
+Google requires, for every user in the EEA, the UK and Switzerland, whether EU rules apply and the
+user's `ad_user_data` and `ad_personalization` consents. From 2.6.0 AttriKit reads them from the
+IAB TCF consent your consent management platform stores on the device (the standard `IABTCF_`
+keys), with no code, and sends them to Google with each event. To stop reading them, call this
+before `start`:
+
+```swift
+AttriKit.setTCFDataCollectionEnabled(false)
+```
+
+If you collect consent without a TCF platform, set the answers yourself. They take precedence
+over TCF and are kept until you clear them:
+
+```swift
+AttriKit.setGoogleConsent(eea: true, adUserData: true, adPersonalization: false)
+AttriKit.clearGoogleConsent()
+```
+
+These answers only go to Google. `AttriKit.setConsent` stays AttriKit's own consent.
+
 ## App Tracking Transparency (optional)
 
 Add the `AttriKitTracking` product only if the app needs IDFA-based advertising

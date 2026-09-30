@@ -59,6 +59,8 @@ struct AttriKitTestingConfiguration: Sendable {
     /// Every wait of the attribution poll. A seam so a test can move past the ladder's rungs (5 s up
     /// to 6 h) and prove the poll stopped, which no test observing real time for a second can do.
     let attributionPollSleep: @Sendable (Duration) async -> Void
+    /// Where a consent management platform stores the IAB TCF keys: standard UserDefaults.
+    let tcfDefaults: SDKStorage.Defaults
 
     init(
         baseURL: URL,
@@ -71,10 +73,12 @@ struct AttriKitTestingConfiguration: Sendable {
         backgroundRetryScheduler: BackgroundRetryScheduler = .live,
         diagnostic: @escaping @Sendable (String) -> Void = { AttriKitTestingConfiguration.logDiagnostic($0) },
         conversionValues: ConversionValueUpdater = .live,
-        attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+        attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+        tcfDefaults: SDKStorage.Defaults = .standard
     ) {
         self.conversionValues = conversionValues
         self.attributionPollSleep = attributionPollSleep
+        self.tcfDefaults = tcfDefaults
         self.baseURL = baseURL
         self.transport = transport
         self.storage = storage
@@ -379,6 +383,7 @@ actor CoreRuntime {
         try? await configuration.storage.recoverPendingRevocationIfNeeded()
         let previouslyStoredConsent = await configuration.storage.storedConsent()
         self.apiKey = apiKey
+        manualDMA = await configuration.storage.manualDMAConsent()
         self.consent = consent
         startLifecycleObservation()
         switch await deletionTombstoneState() {
@@ -527,6 +532,28 @@ actor CoreRuntime {
            let milestone = ConversionValuePlan.milestone(for: event, properties: properties, schema: schema) {
             await applyConversion(milestone)
         }
+    }
+
+    /// The app's explicit Google DMA values, persisted; nil until set and after a clear.
+    private var manualDMA: DMAConsent?
+    /// Reading the IAB TCF keys is on unless the app turns it off.
+    private var readsTCFConsent = true
+
+    func setManualDMAConsent(_ value: DMAConsent?) async {
+        manualDMA = value
+        try? await configuration.storage.setManualDMAConsent(value)
+    }
+
+    func setTCFConsentReading(_ enabled: Bool) {
+        readsTCFConsent = enabled
+    }
+
+    /// Google's DMA values for what is being recorded now: the app's explicit values, else what
+    /// the TCF keys say at this moment. Read for every event and first-open rather than cached,
+    /// so a choice the user changes in the consent platform applies from the next event.
+    private func dmaConsent() -> DMAConsent? {
+        if let manualDMA { return manualDMA }
+        return readsTCFConsent ? TCFConsent.dmaConsent(from: configuration.tcfDefaults.value) : nil
     }
 
     func configureConversionValues(_ schema: AttriKitConversionSchema) {
@@ -986,6 +1013,7 @@ actor CoreRuntime {
 
         identity = nil
         pendingUserID = nil
+        manualDMA = nil
         sessionID = UUID()
         consent = .unknown
         self.apiKey = nil
@@ -1185,7 +1213,7 @@ actor CoreRuntime {
                 occurredAt: occurredAt,
                 appVersion: appVersion,
                 coarseContext: coarseContext,
-                consent: ConsentPayload(state: producingConsent, policyVersion: 1),
+                consent: ConsentPayload(state: producingConsent, policyVersion: 1, dma: dmaConsent()),
                 appTransactionJWS: appTransactionJWS,
                 asaToken: asaToken,
                 exactTokenReference: exactToken,
@@ -2185,7 +2213,8 @@ actor CoreRuntime {
         EventConsent(
             measurement: consent.allowsMeasurement ? "granted" : "denied",
             tracking: consent.allowsTracking ? "granted" : (consent == .unknown ? "unknown" : "denied"),
-            policyVersion: 1
+            policyVersion: 1,
+            dma: dmaConsent()
         )
     }
 }
