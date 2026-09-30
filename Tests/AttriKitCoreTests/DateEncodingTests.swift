@@ -87,6 +87,12 @@ final class DateEncodingTests: XCTestCase {
                 results.record(index: index, encoded: "encode or decode failed")
                 return
             }
+            // The decode half is checked against the instant, not only counted: a racing shared
+            // formatter that returns a wrong date still yields one element.
+            guard abs(decoded[0].timeIntervalSince1970 - dates[index].timeIntervalSince1970) < 0.0005 else {
+                results.record(index: index, encoded: "decode landed on \(decoded[0].timeIntervalSince1970), not \(dates[index].timeIntervalSince1970)")
+                return
+            }
             results.record(index: index, encoded: String(decoding: encoded, as: UTF8.self))
         }
 
@@ -125,20 +131,28 @@ final class DateEncodingTests: XCTestCase {
 private final class ConcurrentResults: @unchecked Sendable {
     private let lock = NSLock()
     private var encoded: [String]
+    /// Four iterations share one slot. A failure recorded by any of them is kept apart from the
+    /// encodings, so a later success for the same index cannot overwrite the race it caught.
+    private var failures: [String?]
 
     init(count: Int) {
         encoded = Array(repeating: "", count: count)
+        failures = Array(repeating: nil, count: count)
     }
 
     func record(index: Int, encoded value: String) {
         lock.lock()
-        encoded[index] = value
+        if value.hasPrefix("encode") || value.hasPrefix("decode") {
+            failures[index] = failures[index] ?? value
+        } else {
+            encoded[index] = value
+        }
         lock.unlock()
     }
 
     func snapshot() -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return encoded
+        return encoded.indices.map { failures[$0] ?? encoded[$0] }
     }
 }

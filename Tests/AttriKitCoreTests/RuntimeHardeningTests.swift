@@ -530,8 +530,10 @@ final class RuntimeHardeningTests: XCTestCase {
         let firstBody = try XCTUnwrap(bodies.first, "the first attempt sent no body")
         let secondBody = try XCTUnwrap(bodies.dropFirst().first, "the second attempt sent no body")
         XCTAssertEqual(firstBody, secondBody)
-        let queueAfterRetry = try await storage.queuedEvents()
-        XCTAssertTrue(queueAfterRetry.isEmpty)
+        // The stub records a request before its response is handled: wait for the acknowledgement
+        // to empty the queue instead of reading it the instant the second request appears.
+        let queueEmptied = await waitUntil { (try? await storage.queuedEvents())?.isEmpty == true }
+        XCTAssertTrue(queueEmptied, "the acknowledged retry must remove the batch from the queue")
         await runtime.shutdown()
     }
 
@@ -647,6 +649,9 @@ final class RuntimeHardeningTests: XCTestCase {
         }.count
         let repeatedResult = await firstRuntime.acceptExactToken(token, kind: "clipboard")
         XCTAssertEqual(repeatedResult, .ignored)
+        // identify is delivered through a 100 ms-delayed transport: a duplicate would land AFTER this
+        // line without the settle, and the count below would miss it.
+        try? await Task.sleep(for: .milliseconds(250))
         let identifyCountAfterReplay = await transport.requests().filter {
             $0.url?.path.hasSuffix("/v1/ingest/identify") == true
         }.count
@@ -2101,7 +2106,9 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertTrue(persisted, "control: a valid id must be persisted")
 
         await runtime.setUserID("someone@example.com")
-        let afterRefusal = await storage.storedUserID()
+        // A NEGATIVE cannot be polled for; it is read after the store has had the same window a
+        // write takes, so a refusal that erased the id in the background is seen, not raced past.
+        let afterRefusal = await settledStoredUserID(storage)
         XCTAssertEqual(
             afterRefusal,
             "rc-app-user-id",
@@ -2109,8 +2116,10 @@ final class RuntimeHardeningTests: XCTestCase {
         )
 
         await runtime.setUserID(nil)
-        let afterExplicitClear = await storage.storedUserID()
-        XCTAssertNil(afterExplicitClear, "an explicit nil must still clear the stored id")
+        // Polled, not read once: the clear persists on the same asynchronous path the sets above
+        // wait for, and an immediate read would fail on scheduling rather than on the code.
+        let afterExplicitClear = await waitUntil { await storage.storedUserID() == nil }
+        XCTAssertTrue(afterExplicitClear, "an explicit nil must still clear the stored id")
         await runtime.shutdown()
     }
 
@@ -2130,19 +2139,21 @@ final class RuntimeHardeningTests: XCTestCase {
 
         // 2. Passing a non-empty invalid ID (contains '@') must NOT clear the valid ID.
         await runtime.setUserID("bad-email@domain.com")
-        let afterEmail = await storage.storedUserID()
+        let afterEmail = await settledStoredUserID(storage)
         XCTAssertEqual(afterEmail, "user-valid-1", "non-empty invalid id must not clear stored id")
 
         // 3. Passing a non-empty invalid ID (oversized > 256 bytes) must NOT clear the valid ID.
         let oversized = String(repeating: "x", count: 257)
         await runtime.setUserID(oversized)
-        let afterOversized = await storage.storedUserID()
+        let afterOversized = await settledStoredUserID(storage)
         XCTAssertEqual(afterOversized, "user-valid-1", "oversized invalid id must not clear stored id")
 
         // 4. Passing empty string "" MUST clear the stored ID (historical logout idiom).
         await runtime.setUserID("")
-        let afterEmptyClear = await storage.storedUserID()
-        XCTAssertNil(afterEmptyClear, "setUserID(\"\") must clear the stored id (logout idiom)")
+        // Polled for the same reason as the nil clear in the case above: the clear is persisted
+        // asynchronously, so a single immediate read races the background write.
+        let afterEmptyClear = await waitUntil { await storage.storedUserID() == nil }
+        XCTAssertTrue(afterEmptyClear, "setUserID(\"\") must clear the stored id (logout idiom)")
 
         // 5. Re-set valid ID, then clear with explicit nil.
         await runtime.setUserID("user-valid-2")
@@ -2150,8 +2161,10 @@ final class RuntimeHardeningTests: XCTestCase {
         XCTAssertTrue(persisted2, "precondition: valid user id re-stored")
 
         await runtime.setUserID(nil)
-        let afterNilClear = await storage.storedUserID()
-        XCTAssertNil(afterNilClear, "setUserID(nil) must clear the stored id")
+        // Polled like the set above it: the clear is persisted on the same path, so a read taken
+        // before it lands would fail on timing rather than on the code.
+        let cleared = await waitUntil { await storage.storedUserID() == nil }
+        XCTAssertTrue(cleared, "setUserID(nil) must clear the stored id")
 
         await runtime.shutdown()
     }
@@ -2755,4 +2768,16 @@ private final class PollCounter: @unchecked Sendable {
         count += 1
         return count
     }
+}
+
+
+/// The stored id once writes have had time to land: five reads 10 ms apart, the last one returned.
+/// For asserting that a refused value did NOT change storage, which a single immediate read cannot.
+private func settledStoredUserID(_ storage: SDKStorage) async -> String? {
+    var value = await storage.storedUserID()
+    for _ in 0..<5 {
+        try? await Task.sleep(for: .milliseconds(10))
+        value = await storage.storedUserID()
+    }
+    return value
 }

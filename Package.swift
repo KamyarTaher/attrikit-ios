@@ -12,6 +12,7 @@ let package = Package(
         .library(name: "AttriKitCore", targets: ["AttriKitCore"]),
         .library(name: "AttriKitTracking", targets: ["AttriKitTracking"]),
         .library(name: "AttriKitLinkToken", targets: ["AttriKitLinkToken"]),
+        .library(name: "AttriKitSuperwall", targets: ["AttriKitSuperwall"]),
     ],
     targets: [
         .target(
@@ -31,6 +32,12 @@ let package = Package(
             resources: [.process("Resources")],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
+        .target(
+            name: "AttriKitSuperwall",
+            dependencies: ["AttriKitCore"],
+            resources: [.process("Resources")],
+            swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
+        ),
         .testTarget(
             name: "AttriKitCoreTests",
             dependencies: ["AttriKitCore"],
@@ -45,6 +52,11 @@ let package = Package(
         .testTarget(
             name: "AttriKitLinkTokenTests",
             dependencies: ["AttriKitCore", "AttriKitLinkToken"],
+            swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
+        ),
+        .testTarget(
+            name: "AttriKitSuperwallTests",
+            dependencies: ["AttriKitCore", "AttriKitSuperwall"],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]
         ),
     ],

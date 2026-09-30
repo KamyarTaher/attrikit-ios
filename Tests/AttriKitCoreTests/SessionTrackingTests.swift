@@ -57,12 +57,14 @@ final class SessionTrackingTests: XCTestCase {
         let observer = ApplicationLifecycleObserver(applicationIsActive: { true })
         let startMoment = Date()
         observer.start { event, occurredAt in
-            // Suspend briefly to verify that asynchronous execution does not block the observer
-            try? await Task.sleep(nanoseconds: 10_000_000)
+            // The handler holds the delivery for longer than the bound below allows start() to
+            // take: a start() that waited for the handler would need at least this long, so the
+            // bound can see it. A 10 ms hold under a 0.5 s bound could not.
+            try? await Task.sleep(nanoseconds: 400_000_000)
             await deliveries.record(event, occurredAt: occurredAt)
         }
         let elapsed = Date().timeIntervalSince(startMoment)
-        XCTAssertLessThan(elapsed, 0.5, "observer.start must return promptly without blocking synchronously on the async handler")
+        XCTAssertLessThan(elapsed, 0.2, "observer.start must return promptly without blocking synchronously on the async handler")
 
         let delivered = await waitUntil(timeout: .seconds(2)) {
             await deliveries.count() == 1
@@ -78,7 +80,7 @@ final class SessionTrackingTests: XCTestCase {
         let postMoment = Date()
         NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
         let postElapsed = Date().timeIntervalSince(postMoment)
-        XCTAssertLessThan(postElapsed, 0.5, "willResignActive notification post must return promptly without blocking on the async handler")
+        XCTAssertLessThan(postElapsed, 0.2, "willResignActive notification post must return promptly without blocking on the async handler")
 
         let resignDelivered = await waitUntil(timeout: .seconds(2)) {
             await deliveries.count() == 2
@@ -92,7 +94,9 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertTrue(terminateDelivered, "willTerminate notification must be delivered through the background lease pipeline")
 
         let allEvents = await deliveries.allEvents()
-        XCTAssertEqual(allEvents.count, 3)
+        guard allEvents.count == 3 else {
+            return XCTFail("expected three lifecycle deliveries, got \(allEvents.count)")
+        }
         XCTAssertEqual(allEvents[0].0, .didBecomeActive)
         XCTAssertEqual(allEvents[1].0, .willResignActive)
         XCTAssertEqual(allEvents[2].0, .willTerminate)
@@ -103,7 +107,9 @@ final class SessionTrackingTests: XCTestCase {
         #if canImport(UIKit) && os(iOS)
         // Post again after stop() to verify that stopped observer unregisters and drops notifications
         NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // Longer than the handler's own hold above, so a delivery that still went through would
+        // have been recorded by the time this reads.
+        try? await Task.sleep(nanoseconds: 600_000_000)
         let countAfterStop = await deliveries.count()
         XCTAssertEqual(countAfterStop, 3, "stopped observer must unregister and not deliver notifications")
         #endif
@@ -229,7 +235,12 @@ final class SessionTrackingTests: XCTestCase {
         // the delivery call is stable under that kind of edit and still cannot match the other
         // observers.
         guard let synthesisStart = observer.range(of: "deliveryChain.deliver { [weak self] in"),
-              let synthesisEnd = observer.range(of: "await handler(.didBecomeActive, observedAt)")
+              // Searched AFTER the start anchor, so the slice is the synthesis block and not a
+              // span between two unrelated first matches.
+              let synthesisEnd = observer.range(
+                  of: "await handler(.didBecomeActive, observedAt)",
+                  range: synthesisStart.upperBound..<observer.endIndex
+              )
         else {
             return XCTFail("synthesis block not found — this test's anchors are stale, not the code")
         }
@@ -509,6 +520,16 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual(queued, 0, "an opt-out before start must not even QUEUE a session")
         let events = await sessionEvents(in: transport)
         XCTAssertTrue(events.isEmpty)
+
+        // The live control, as in the denied-consent case: the same lifecycle, transport and
+        // queue must record a session once tracking is enabled, or the emptiness above could be
+        // a fixture that records nothing.
+        AttriKit.setSessionTrackingEnabled(true)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        await lifecycle.send(.willResignActive)
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the same fixture must record a session once tracking is enabled")
     }
 
     func testOptOutStopsAnAlreadyActiveSessionWithoutAnEndEvent() async throws {
@@ -533,6 +554,15 @@ final class SessionTrackingTests: XCTestCase {
         XCTAssertEqual(queued, 0, "an opt-out mid-session must not even QUEUE its session_end")
         let events = await sessionEvents(in: transport)
         XCTAssertTrue(events.isEmpty)
+
+        // The live control: the same fixture records the next session once tracking is back on,
+        // which is what makes the empty queue above a statement about the opt-out.
+        AttriKit.setSessionTrackingEnabled(true)
+        _ = await AttriKit.attribution(timeout: .zero)
+        await lifecycle.send(.didBecomeActive)
+        await lifecycle.send(.willResignActive)
+        let delivered = await waitForSessionEventCount(1, in: transport)
+        XCTAssertTrue(delivered, "the same fixture must record a session once tracking is enabled again")
     }
 
     func testSessionIndexPersistsAcrossRuntimeReconfiguration() async throws {

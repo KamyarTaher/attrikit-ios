@@ -127,7 +127,6 @@ final class RetryLadderTests: XCTestCase {
         // stopped poll never fabricates .unattributed, which is a claim about the INSTALL.
         let answer = await runtime.attribution(timeout: .milliseconds(1))
         XCTAssertEqual(answer, .consentRequired, "a poll stopped by consent must say so, never .unattributed")
-        XCTAssertNotEqual(answer, .unattributed, "exhaustion and consent loss are never an attribution verdict")
         await runtime.shutdown()
     }
 
@@ -344,7 +343,7 @@ final class RetryLadderTests: XCTestCase {
         let secondLanded = await waitUntil { await firstOpenRequestCount(transport) == 2 }
         XCTAssertTrue(secondLanded, "the resumed delivery must still be attempted once")
         let cleared = await waitUntil { await storage.retryState() == nil }
-        // Attempt 2 of 6 — the ladder is nowhere near exhausted, so a surviving RetryState here
+        // Attempt 2 of 7 (the first delivery plus six retries) — the ladder is nowhere near exhausted, so a surviving RetryState here
         // means the window is not being enforced and the install can be retried forever.
         XCTAssertTrue(cleared, "a first-open older than the 24h window must not be rescheduled")
 

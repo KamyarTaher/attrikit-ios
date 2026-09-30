@@ -218,6 +218,9 @@ private static func liveEndpoint() -> URL {
         let attempted = await waitUntil {
             await transport.requests().contains { $0.url?.path.contains("events:batch") == true }
         }
+        // The request being recorded is not the 401 being handled: give the runtime the flush's
+        // own turn before shutdown, or the queue check runs against an unhandled response.
+        try? await Task.sleep(for: .milliseconds(50))
         await runtime.shutdown()
 
         XCTAssertTrue(attempted)
@@ -344,6 +347,11 @@ private static func liveEndpoint() -> URL {
             JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
         XCTAssertEqual(json["customer_user_id"] as? String, "customer-user-42")
+        // AFTER the first open, as the name says: an identify before it has no install to join.
+        let paths = await transport.requests().compactMap { $0.url?.path }
+        let firstOpenAt = try XCTUnwrap(paths.firstIndex { $0.hasSuffix("/v1/ingest/first-open") })
+        let identifyAt = try XCTUnwrap(paths.firstIndex { $0.hasSuffix("/v1/ingest/identify") })
+        XCTAssertLessThan(firstOpenAt, identifyAt, "the identify join must follow the first open")
     }
 
     /// A relaunch must send the SAME first-open bytes as launch 1. The server hashes the whole
@@ -1556,8 +1564,9 @@ private static func liveEndpoint() -> URL {
     /// fixes, and a 401 is an app key rotated between launches — both recover on the next poll, and
     /// both used to poison the session instead.
     ///
-    /// Asserted as a NON-answer rather than as a success: the poll after the 403 succeeds, and the
-    /// only way it can be observed is if the 403 did not write a terminal state first.
+    /// Asserted through the RECOVERY rather than through the absence of `.failed`: the poll after
+    /// the 403 succeeds, and the only way that success can be observed is if the 403 did not write
+    /// a terminal state first.
     func testATransientRefusalDoesNotPermanentlyFailAttributionForTheSession() async {
         let transport = StubTransport { request, count in
             guard request.httpMethod == "GET" else {
@@ -1609,6 +1618,7 @@ private static func liveEndpoint() -> URL {
             "attrkit_network": "meta",
             "attrkit_campaign_id": "campaign-1",
             "attrkit_source_type": "owned_deferred_token",
+            "attrkit_finality": "final",
         ])
     }
 
@@ -1642,14 +1652,39 @@ private static func liveEndpoint() -> URL {
     }
 
     func testPlacementParametersReturnsEmptyForEveryUnresolvedState() async {
-        let transport = StubTransport { _, _ in
+        // Pending: the server has not answered yet.
+        let pending = StubTransport { _, _ in
             successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":500}"#)
         }
-        await AttriKit.configureForTesting(makeTestConfiguration(transport: transport))
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: pending))
         AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let pendingParameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
+        XCTAssertEqual(pendingParameters, [:], "pending")
 
-        let parameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
-        XCTAssertEqual(parameters, [:])
+        // Not started: configured, never started.
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: pending))
+        let notStartedParameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
+        XCTAssertEqual(notStartedParameters, [:], "not started")
+
+        // Denied consent: started, but measurement never begins.
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: pending))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .denied)
+        let deniedParameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
+        XCTAssertEqual(deniedParameters, [:], "denied consent")
+
+        // Failed: the one terminal refusal this route emits (see testAnInvalidEpochStaysPermanentlyFailed).
+        let failing = StubTransport { request, _ in
+            guard request.httpMethod == "GET" else {
+                return successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":10}"#)
+            }
+            return successResult(status: 400, body: #"{"error":"invalid_install_epoch_id"}"#)
+        }
+        await AttriKit.configureForTesting(makeTestConfiguration(transport: failing))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let failedResult = await AttriKit.attribution(timeout: .seconds(2))
+        XCTAssertEqual(failedResult, .failed, "precondition: the state is failed")
+        let failedParameters = await AttriKit.placementParameters(timeout: .milliseconds(10))
+        XCTAssertEqual(failedParameters, [:], "failed")
     }
 
     func testAttributionTimeoutPath() async {
@@ -1889,8 +1924,10 @@ final class KeychainFallbackTests: XCTestCase {
         // Launch 1: healthy, reads the pre-existing identity.
         let first = SDKStorage(defaults: SDKStorage.Defaults(value: suite), keychain: healthy, directory: dir)
         let original = try await first.initializeIdentities()
-        // A first-ever launch MINTS the id, so it correctly reports no lineage. Lineage is claimed
-        // only when an existing keychain value is found, which is the launch below.
+        // Lineage is claimed only when an existing keychain value is found, which is THIS launch:
+        // it reads the pre-seeded id. A first-ever launch would MINT the id and report no lineage,
+        // and that is the case the pre-seeding above keeps out of this test. The degraded launch
+        // below must report the same id and no lineage.
         XCTAssertEqual(original.installationID, seeded, "precondition: the stored identity is read")
         XCTAssertTrue(original.localLineagePresent, "precondition: an existing keychain id is lineage")
 
@@ -2212,8 +2249,9 @@ extension AttriKitCoreTests {
     /// When discarding an unauthorized IDFA-carrying payload, persistedBody and storage are cleared.
     /// If selectedFirstOpenBody is not reset alongside them, the subsequent concurrency fallback
     /// re-selects selectedFirstOpenBody.body, transmitting the forbidden IDFA payload.
-    /// Verifies that when tracking consent is withdrawn, selectedFirstOpenBody holding an IDFA payload
-    /// is reset to nil and does not re-select the unauthorized payload.
+    /// Verifies that a selected first-open body carrying an IDFA the runtime is not authorized to
+    /// send (consent stays granted; the payload itself is the unauthorized one) is discarded: the
+    /// wire carries no idfa, and the selection is reset to nil rather than re-selected.
     func testUnauthorizedIdfaPayloadDiscardsSelectedFirstOpenBody() async throws {
         let idfa = UUID(uuidString: "12121212-1212-4121-8121-121212121212")!
         let transport = StubTransport { _, _ in successResult() }
@@ -2258,13 +2296,19 @@ extension AttriKitCoreTests {
             body: idfaPayload
         ))
 
+        let firstOpenRequestsBefore = await transport.requests().filter {
+            $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
+        }.count
         await runtime.submitFirstOpenForTesting()
         await runtime.shutdown()
 
-        // 1. The transmitted payload on the wire must not re-select the forbidden IDFA payload
+        // 1. The transmitted payload on the wire must not re-select the forbidden IDFA payload.
+        // The submit must have SENT something: `requests.last` would otherwise be the clean
+        // first-open the start already put on the wire, and the assertion below would be vacuous.
         let requests = await transport.requests().filter {
             $0.url?.path.hasSuffix("/v1/ingest/first-open") == true
         }
+        XCTAssertGreaterThan(requests.count, firstOpenRequestsBefore, "the submit must send a first-open request")
         let request = try XCTUnwrap(requests.last)
         let body = try gunzipStored(XCTUnwrap(request.httpBody))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -2363,12 +2407,19 @@ extension AttriKitCoreTests {
         await runtime.submitFirstOpenForTesting()
         await runtime.shutdown()
 
-        // When concurrent storage resolves the first-open body, selectedFirstOpenBody is reset to nil
+        // After the submit discards the unauthorized payload, selectedFirstOpenBody is reset to nil.
         let selected = await runtime.selectedFirstOpenBodyForTesting()
         XCTAssertNil(
             selected,
             "selectedFirstOpenBody must be reset to nil after discarding unauthorized IDFA payload"
         )
+        // ...and the wire carried no idfa: clearing the selection AFTER sending it would pass the
+        // line above and defeat the property this test is named for.
+        for request in await transport.requests() where request.url?.path.hasSuffix("/v1/ingest/first-open") == true {
+            let body = try gunzipStored(XCTUnwrap(request.httpBody))
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertNil(json["idfa"], "an unauthorized idfa must never reach the wire")
+        }
     }
 }
 

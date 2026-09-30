@@ -12,6 +12,42 @@ public enum AttriKit {
         facade.enqueue { core in await core.start(apiKey: apiKey, consent: consent) }
     }
 
+    /// The installation id the SDK is measuring under, in the exact lowercase spelling it sends to
+    /// AttriKit, or nil when it is not measuring.
+    ///
+    /// Pass it to your own backend wherever a purchase is recorded, so revenue AttriKit did not see
+    /// on the device can still be joined to this install: RevenueCat's `appUserID` (AttriKit
+    /// matches a RevenueCat webhook whose `app_user_id` equals this value directly), Stripe
+    /// checkout `metadata`, or your server's user record.
+    ///
+    /// It is the id the SDK's own initialization established in this process, never one it reads
+    /// or creates on the side, so it always equals the id on the SDK's requests. It is nil until
+    /// `start(apiKey:consent:)` has run with measurement consent (`start` returns before it has
+    /// run: read `await AttriKit.installID()` after it), nil while a `deleteData()` request is
+    /// pending, and nil whenever consent does not allow measurement (unknown, denied or revoked),
+    /// from the moment consent changes. Between launches it changes only when
+    /// the SDK's own measurement does: a reinstall that did not keep the Keychain, a completed
+    /// deletion, or a launch whose Keychain could not be read.
+    public static var installID: String? {
+        facade.currentRuntime().hostInstallationID()
+    }
+
+    /// `installID` once every call made before this one has run, `start` included: the way to read
+    /// it at launch, since `start(apiKey:consent:)` returns before measurement has started.
+    ///
+    /// - Parameter queueTimeout: Bounds the wait for previously enqueued operations to drain. When nil, queued operations drain without a separate time bound. A wait that runs out or is cancelled answers nil.
+    public static func installID(queueTimeout: Duration? = nil) async -> String? {
+        let outcome = await facade.withRuntime(queueTimeout: queueTimeout) { core in
+            core.hostInstallationID()
+        }
+        switch outcome {
+        case .completed(let installID):
+            return installID
+        case .timedOut, .cancelled:
+            return nil
+        }
+    }
+
     /// Updates the host's measurement/tracking consent state.
     ///
     /// Revocation clears queued measurement data, rotates the install epoch, and resets
@@ -31,6 +67,22 @@ public enum AttriKit {
 
     public static func track(_ event: AttriKitEvent, properties: [String: AttriKitValue] = [:]) {
         facade.enqueue { core in await core.track(event, properties: properties) }
+    }
+
+    /// Makes AttriKit the single writer of this app's SKAdNetwork and AdAttributionKit conversion
+    /// values, under `schema`. Tracked events then raise the value on their own: the schema's
+    /// activation event, `trial_started` or `intro_started`, and `purchase`, `purchase_completed`,
+    /// `subscription_started` or `subscription_renewed` carrying a numeric `value` and a `currency`
+    /// equal to the schema's. Call it before `start`, and do not call SKAdNetwork or
+    /// AdAttributionKit update APIs yourself. Requires measurement consent, like every other write.
+    public static func configureConversionValues(_ schema: AttriKitConversionSchema) {
+        facade.enqueue { core in await core.configureConversionValues(schema) }
+    }
+
+    /// Raises the conversion value for a milestone the SDK cannot see as an event, for example
+    /// revenue your server received from RevenueCat. A no-op until `configureConversionValues`.
+    public static func recordConversion(_ milestone: AttriKitConversionMilestone) {
+        facade.enqueue { core in await core.recordConversion(milestone) }
     }
 
     /// Returns the resolved attribution result for this install.
@@ -75,8 +127,11 @@ public enum AttriKit {
     }
 
     /// Returns deterministic attribution as placement parameters for Superwall or another
-    /// paywall/user-attribute SDK. Call before the first campaign-sensitive placement.
-    /// Non-deterministic, unresolved, or consent-blocked attribution returns an empty dictionary.
+    /// paywall/user-attribute SDK: `attrkit_method`, `attrkit_network`, `attrkit_campaign_id`,
+    /// `attrkit_source_type`, `attrkit_finality`, and, when the server has them,
+    /// `attrkit_campaign_name`, `attrkit_network_campaign_id`, `attrkit_adset_id` and
+    /// `attrkit_ad_id`. Device-matched, organic, unresolved, or consent-blocked attribution
+    /// returns an empty dictionary. For a dictionary that always says WHY, use `userAttributes`.
     ///
     /// Queued operations drain without a separate time bound before the attribution
     /// polling loop begins.
@@ -88,7 +143,7 @@ public enum AttriKit {
     }
 
     /// Returns deterministic attribution as placement parameters for Superwall or another
-    /// paywall/user-attribute SDK. Call before the first campaign-sensitive placement.
+    /// paywall/user-attribute SDK; see `placementParameters(timeout:)` for the keys.
     /// Non-deterministic, unresolved, or consent-blocked attribution returns an empty dictionary.
     ///
     /// - Parameters:
@@ -101,7 +156,7 @@ public enum AttriKit {
     }
 
     /// Returns deterministic attribution as placement parameters for Superwall or another
-    /// paywall/user-attribute SDK. Call before the first campaign-sensitive placement.
+    /// paywall/user-attribute SDK; see `placementParameters(timeout:)` for the keys.
     /// Non-deterministic, unresolved, or consent-blocked attribution returns an empty dictionary.
     ///
     /// - Parameters:
@@ -110,6 +165,65 @@ public enum AttriKit {
     /// - Returns: Placement parameter dictionary, or empty if attribution is unresolved, timed out, cancelled, or non-deterministic.
     public static func placementParameters(timeout: Duration = .seconds(2), queueBound: Duration?) async -> [String: String] {
         await placementParameters(timeout: timeout, queueTimeout: queueBound)
+    }
+
+    /// Attribution as Superwall user attributes, never empty: `attrkit_status` is always present
+    /// (`attributed`, `device_matched`, `organic`, `pending`, `consent_required`, `timed_out`), so a
+    /// context without campaign keys still says why. `attrkit_finality` follows once the server
+    /// answered, and a deterministic match adds every key of `placementParameters`. Every other
+    /// `attrkit_` key is present with a `nil` value, which Superwall's merging `setUserAttributes`
+    /// reads as "remove": a key an earlier answer set never outlives the answer that set it.
+    ///
+    /// The answer can improve after this returns: subscribe to `attributionUpdates()` and pass each
+    /// update's `userAttributes` to `Superwall.shared.setUserAttributes(_:)`.
+    ///
+    /// - Parameters:
+    ///   - timeout: Bounds the attribution polling loop once execution begins. It does not bound the wait for previously enqueued operations to drain.
+    ///   - queueTimeout: Bounds the wait for previously enqueued operations to drain. When nil, queued operations drain without a separate time bound. A wait that runs out or is cancelled answers `attrkit_status: pending`.
+    public static func userAttributes(timeout: Duration = .seconds(2), queueTimeout: Duration? = nil) async -> [String: String?] {
+        let outcome = await facade.withRuntime(queueTimeout: queueTimeout) { core in
+            await core.attributionUpdate(timeout: timeout)
+        }
+        switch outcome {
+        case .completed(let update):
+            return update.userAttributes
+        case .timedOut, .cancelled:
+            return AttributionUpdate(status: .pending, attribution: nil).userAttributes
+        }
+    }
+
+    /// Every change of this install's attribution state, starting with the current one.
+    ///
+    /// The first answer the server gives is provisional for 72 hours, and the SDK keeps asking while
+    /// it is: an install first answered `organic` can become `attributed` once its Apple Ads
+    /// exchange or its link token is processed. Use this to refresh paywall user attributes when
+    /// that happens:
+    ///
+    /// ```swift
+    /// Task {
+    ///     for await update in AttriKit.attributionUpdates() {
+    ///         Superwall.shared.setUserAttributes(update.userAttributes)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Only real changes are published; re-reading the same answer publishes nothing.
+    public static func attributionUpdates() -> AsyncStream<AttributionUpdate> {
+        AsyncStream { continuation in
+            let id = UUID()
+            continuation.onTermination = { _ in
+                facade.enqueue { core in await core.removeAttributionObserver(id) }
+            }
+            facade.enqueue { core in await core.addAttributionObserver(id, continuation) }
+        }
+    }
+
+
+    /// Where this install's Apple Ads (AdServices) token got to: how its collection ended, and
+    /// whether the first-open carrying it was delivered. Nil before measurement starts and for an
+    /// install whose first-open was built by an SDK older than 2.5.0.
+    public static func appleAdsTokenStatus() async -> AppleAdsTokenStatus? {
+        await facade.withRuntime { core in await core.appleAdsTokenStatus() }
     }
 
     public static func handle(_ url: URL) async -> DeepLinkResult {
@@ -142,6 +256,14 @@ public enum AttriKit {
     @_spi(AttriKitLinkToken)
     public static func canReadLinkTokenPasteboard() async -> Bool {
         await facade.withRuntime { core in await core.canReadLinkTokenPasteboard() }
+    }
+
+    /// Whether `track` would accept this one property. A companion module that builds properties
+    /// from another SDK's data uses it to drop a single unacceptable value, because `track` refuses
+    /// the WHOLE event on the first one it rejects.
+    @_spi(AttriKitSuperwall)
+    public static func acceptsProperty(_ key: String, _ value: AttriKitValue) -> Bool {
+        (try? validateProperties([key: value])) != nil
     }
 
     @_spi(AttriKitTracking)
@@ -290,7 +412,7 @@ private final class DrainCoordinator: @unchecked Sendable {
 
     func run(
         targetGeneration: UInt64,
-        timeout: Duration,
+        timeout: Duration?,
         continuation: CheckedContinuation<DrainResult, Never>
     ) {
         lock.lock()
@@ -307,6 +429,13 @@ private final class DrainCoordinator: @unchecked Sendable {
             // Already drained in facade!
             lock.unlock()
             continuation.resume(returning: .completed)
+            return
+        }
+
+        // No bound: the waiter resolves when the queue drains or the caller is cancelled.
+        guard let timeout else {
+            self.waiterID = id
+            lock.unlock()
             return
         }
 
@@ -336,6 +465,12 @@ private final class AttriKitFacade: @unchecked Sendable {
     private var completedGeneration: UInt64 = 0
     private var nextWaiterID: UInt64 = 0
     private var waiters: [UInt64: DrainWaiter] = [:]
+
+    /// The runtime a synchronous accessor reads from. Not ordered behind the queue on purpose: the
+    /// `installID` property answers at once with whatever the runtime has established so far.
+    func currentRuntime() -> CoreRuntime {
+        locked { runtime }
+    }
 
     func enqueue(_ operation: @escaping @Sendable (CoreRuntime) async -> Void) {
         lock.lock()
@@ -507,8 +642,14 @@ private final class AttriKitFacade: @unchecked Sendable {
         _ operation: @escaping @Sendable (CoreRuntime) async -> T
     ) async -> BoundedRuntimeOutcome<T> {
         guard let queueTimeout else {
-            let snapshot: (Task<Void, Never>?, CoreRuntime) = locked { (tail, runtime) }
-            if let tail = snapshot.0 { await tail.value }
+            // Unbounded, but not deaf to cancellation. Awaiting the tail task directly could not
+            // be interrupted, so a cancelled caller waited out every queued operation and then
+            // got an answer the documentation says it does not get. The drain waiter resolves on
+            // the drain or on this caller's cancellation, and cancelling it never cancels the
+            // queued operations, which belong to the app.
+            let target: UInt64? = locked { completedGeneration >= enqueueGeneration ? nil : enqueueGeneration }
+            if let target, await drainGeneration(target, timeout: nil) != .completed { return .cancelled }
+            if Task.isCancelled { return .cancelled }
             let lease = acquireRuntimeLease()
             defer { lease.release() }
             return .completed(await operation(lease.runtime))
@@ -551,7 +692,7 @@ private final class AttriKitFacade: @unchecked Sendable {
         }
     }
 
-    private func drainGeneration(_ targetGeneration: UInt64, timeout: Duration) async -> DrainResult {
+    private func drainGeneration(_ targetGeneration: UInt64, timeout: Duration?) async -> DrainResult {
         let coordinator = DrainCoordinator(facade: self)
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in

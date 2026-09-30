@@ -231,12 +231,13 @@ final class ReportedSymptomTests: XCTestCase {
         XCTAssertTrue(synthesized.contains("self.currentActivationGeneration() == captured"))
         XCTAssertTrue(synthesized.contains("self.isCurrentSubscription(installGen) else { return }"))
 
+        // The decoys sit INSIDE the closure the scope helper returns: a string literal and a comment
+        // carrying the guard's text, which only the executable-source stripping can remove. Placed
+        // before the closure they were outside the scope and the assertion could not fail.
         let deadFixture = swiftExecutableSource(#"""
-            let decoy = "self.isCurrentSubscription(installGen) else { return }"
-            func unreachableDecoy() {
-                guard let self, self.isCurrentSubscription(installGen) else { return }
-            }
             center.addObserver(forName: UIApplication.didBecomeActiveNotification) { _ in
+                let decoy = "self.isCurrentSubscription(installGen) else { return }"
+                // guard let self, self.isCurrentSubscription(installGen) else { return }
                 deliver(through: deliveryChain)
             }
             """#)

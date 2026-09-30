@@ -1,6 +1,6 @@
 import Foundation
 
-let attriKitSDKVersion = "2.4.1"
+let attriKitSDKVersion = "2.5.0"
 
 struct ConsentPayload: Codable, Sendable {
     let state: AttriKitConsent
@@ -214,6 +214,16 @@ struct FirstOpenResponse: Decodable, Sendable {
     }
 }
 
+/// `GET /v1/attribution/{install_epoch_id}`.
+///
+/// `status` is the attribution version's LIFECYCLE state (provisional, final, corrected, closed),
+/// or `pending` with no row; `attribution_status` is the verdict (attributed, device_matched,
+/// organic, pending, consent_required). The fields after `policy_version` were added by the server
+/// on 2026-09-30 and are optional, so this build keeps decoding a server that predates them.
+///
+/// Synthesized Decodable on purpose, and pinned so by apps/link/src/ingestion/attribution-context.test.ts:
+/// it ignores keys it does not name, which is what lets the server add keys without breaking the
+/// binaries already in apps.
 struct AttributionResponse: Decodable, Sendable {
     let status: String?
     let method: String?
@@ -222,17 +232,45 @@ struct AttributionResponse: Decodable, Sendable {
     let campaignID: String?
     let finality: String?
     let policyVersion: Int?
+    let attributionStatus: String?
+    let adsetID: String?
+    let adID: String?
+    let confidence: Double?
+    let campaignName: String?
+    let networkCampaignID: String?
 
     enum CodingKeys: String, CodingKey {
-        case status, method, network, finality
+        case status, method, network, finality, confidence
         case sourceType = "source_type"
         case campaignID = "campaign_id"
         case policyVersion = "policy_version"
+        case attributionStatus = "attribution_status"
+        case adsetID = "adset_id"
+        case adID = "ad_id"
+        case campaignName = "campaign_name"
+        case networkCampaignID = "network_campaign_id"
     }
+
+    /// A 200 that is not an answer yet. The route answers "no row" with a 202 today, but a 200
+    /// saying pending with no method must not be read as an organic install either.
+    var isPending: Bool { method == nil && (status == "pending" || attributionStatus == "pending") }
 
     var attribution: Attribution? {
         guard let method, let finality, let policyVersion else { return nil }
-        return Attribution(method: method, sourceType: sourceType, network: network, campaignID: campaignID, finality: finality, policyVersion: policyVersion)
+        return Attribution(
+            method: method,
+            sourceType: sourceType,
+            network: network,
+            campaignID: campaignID,
+            finality: finality,
+            policyVersion: policyVersion,
+            attributionStatus: attributionStatus,
+            adsetID: adsetID,
+            adID: adID,
+            confidence: confidence,
+            campaignName: campaignName,
+            networkCampaignID: networkCampaignID
+        )
     }
 }
 

@@ -208,7 +208,8 @@ func makeTestConfiguration(
     deviceEvidence: DeviceEvidence = DeviceEvidence(idfa: nil, idfv: nil),
     now: @escaping @Sendable () -> Date = { Date() },
     lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver(),
-    diagnostic: @escaping @Sendable (String) -> Void = { _ in }
+    diagnostic: @escaping @Sendable (String) -> Void = { _ in },
+    attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
 ) -> AttriKitTestingConfiguration {
     let suite = defaults ?? UserDefaults(suiteName: "AttriKitTests.\(UUID())")!
     let folder = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent("AttriKitTests-\(UUID())")
@@ -220,8 +221,56 @@ func makeTestConfiguration(
         deviceEvidence: { deviceEvidence },
         now: now,
         lifecycle: lifecycle,
-        diagnostic: diagnostic
+        diagnostic: diagnostic,
+        attributionPollSleep: attributionPollSleep
     )
+}
+
+/// Virtual time for the attribution poll. `sleep` parks until `advance(by:)` moves past its
+/// deadline, and a cancelled sleeper is released at once, so `shutdown()` never waits on it.
+final class ManualPollScheduler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var elapsed: Duration = .zero
+    private var waiters: [UUID: (deadline: Duration, continuation: CheckedContinuation<Void, Never>)] = [:]
+    private var requested: [Duration] = []
+
+    var requestedSleeps: [Duration] { locked { requested } }
+
+    func sleep(_ duration: Duration) async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                requested.append(duration)
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                waiters[id] = (elapsed + duration, continuation)
+                lock.unlock()
+            }
+        } onCancel: {
+            let waiter = locked { waiters.removeValue(forKey: id) }
+            waiter?.continuation.resume()
+        }
+    }
+
+    func advance(by duration: Duration) {
+        let due: [CheckedContinuation<Void, Never>] = locked {
+            elapsed += duration
+            let ready = waiters.filter { $0.value.deadline <= elapsed }
+            for id in ready.keys { waiters.removeValue(forKey: id) }
+            return ready.values.map(\.continuation)
+        }
+        for continuation in due { continuation.resume() }
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
 }
 
 func successResult(status: Int = 200, body: String = #"{"receipt_id":"r","status":"matched","attribution":{"method":"deterministic","network":"apple_ads","campaign_id":"c1","finality":"provisional","policy_version":1}}"#, headers: [String: String] = [:]) -> HTTPResult {
@@ -239,9 +288,14 @@ func waitUntil(timeout: Duration = .seconds(2), _ condition: @escaping @Sendable
 }
 
 func gunzipStored(_ data: Data) throws -> Data {
-    guard data.count >= 18, data[0] == 0x1f, data[1] == 0x8b else { throw URLError(.cannotDecodeContentData) }
+    // Magic, CM = deflate, and no FLG bits: the encoder writes no FEXTRA/FNAME fields, so the
+    // blocks start at offset 10 only when it says so.
+    guard data.count >= 18, data[0] == 0x1f, data[1] == 0x8b, data[2] == 0x08, data[3] == 0x00 else {
+        throw URLError(.cannotDecodeContentData)
+    }
     var index = 10
     var output = Data()
+    var sawFinal = false
     while index < data.count - 8 {
         let header = data[index]
         index += 1
@@ -254,8 +308,14 @@ func gunzipStored(_ data: Data) throws -> Data {
         guard index + length <= data.count - 8 else { throw URLError(.cannotDecodeContentData) }
         output.append(data.subdata(in: index..<(index + length)))
         index += length
-        if header & 0x01 == 1 { break }
+        if header & 0x01 == 1 {
+            sawFinal = true
+            break
+        }
     }
+    // A stream with no BFINAL block, or with stray bytes between the last block and the trailer,
+    // is one a real gunzip rejects; reading it as valid would sign off on a body the server drops.
+    guard sawFinal, index == data.count - 8 else { throw URLError(.cannotDecodeContentData) }
     let trailer = data.count - 8
     let expectedCRC = UInt32(data[trailer])
         | (UInt32(data[trailer + 1]) << 8)

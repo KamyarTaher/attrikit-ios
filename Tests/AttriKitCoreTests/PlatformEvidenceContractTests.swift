@@ -190,7 +190,7 @@ private func conditionalCompilationIsBalanced(_ source: Substring) -> Bool {
 /// True when the blocking AdServices call is reached only through a global-queue dispatch, so no
 /// Swift-concurrency cooperative thread is held for the duration of a network-backed call.
 private func attributionTokenIsDispatchedOffTheCooperativePool(in source: String) -> Bool {
-    guard let ladder = uncommentedFunctionBody(named: "adServicesToken", in: source),
+    guard let ladder = uncommentedFunctionBody(named: "adServicesTokenCollection", in: source),
           let helper = uncommentedFunctionBody(named: "attributionToken", in: source) else { return false }
     guard !ladder.contains("AAAttribution.attributionToken("),
           ladder.contains("attributionToken()") else { return false }
@@ -214,7 +214,7 @@ private func attributionTokenIsDispatchedOffTheCooperativePool(in source: String
 /// TEST-LANE CAVEAT, stated because it bounds what these greens mean: this package tests as
 /// arm64e-apple-macos, so `coarseContext()`'s `#if os(iOS)` device-class branch is not in this
 /// binary. The locale line is NOT inside that conditional, which is why it can be tested here at
-/// all; the retry ladder in `adServicesToken()` is, and cannot be RUN here -- which is why its one
+/// all; the retry ladder in `adServicesTokenCollection()` is, and cannot be RUN here -- which is why its one
 /// remaining contract, that the blocking AdServices call never runs on the cooperative pool, is
 /// asserted on the production source text below rather than on behaviour.
 final class PlatformEvidenceContractTests: XCTestCase {
@@ -239,8 +239,8 @@ final class PlatformEvidenceContractTests: XCTestCase {
         )
 
         let inlineMutant = text.replacingOccurrences(
-            of: "if let token = await Self.attributionToken() { return token }",
-            with: "if let token = try? AAAttribution.attributionToken() { return token }"
+            of: "if let token = await Self.attributionToken() {",
+            with: "if let token = try? AAAttribution.attributionToken() {"
         )
         XCTAssertFalse(
             attributionTokenIsDispatchedOffTheCooperativePool(in: inlineMutant),

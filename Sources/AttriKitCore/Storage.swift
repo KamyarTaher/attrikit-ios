@@ -81,6 +81,24 @@ enum StorageError: Error {
     case corruptDeletionTombstone
 }
 
+/// Where one epoch's Apple Ads (AdServices) token got to: collected, then carried in a first-open
+/// the server acknowledged. Before it existed the only trace of the funnel was the presence or
+/// absence of `asa_token` in a body, which cannot say why a token was missing.
+struct AppleAdsTokenFunnel: Codable, Equatable, Sendable {
+    let installEpochID: UUID
+    /// How the LATEST collection attempt ended.
+    var outcome: AdServicesTokenOutcome
+    var attempts: Int
+    var latencyMilliseconds: Int
+    var attemptedAt: Date
+    /// When the token now inside the persisted body was collected. Apple's token expires after
+    /// 24 hours, so this, not the latest attempt, decides whether a retry must refresh it.
+    var tokenCollectedAt: Date?
+    /// Set on the first 2xx or 409 for this epoch's first-open. From then on the server holds the
+    /// body, and a rebuilt one would only earn an idempotency conflict.
+    var acknowledgedAt: Date?
+}
+
 struct RetryState: Codable, Sendable {
     var attempt: Int
     var firstAttemptAt: Date
@@ -198,6 +216,8 @@ actor SDKStorage {
         static let consumedTokens = "io.attrikit.consumed-link-tokens"
         static let pendingRevocation = "io.attrikit.pending-revocation"
         static let consentReceipts = "io.attrikit.consent-receipts"
+        static let appleAdsTokenFunnel = "io.attrikit.apple-ads-token-funnel"
+        static let conversionValues = "io.attrikit.conversion-values"
     }
 
     private static let maxConsumedTokens = 128
@@ -481,6 +501,37 @@ actor SDKStorage {
             return nil
         }
         return persisted.body
+    }
+
+    /// The Apple Ads token funnel of the CURRENT epoch; a record left by a rotated epoch reads as
+    /// absent. It is what lets a retry tell a token that aged in an undelivered body from a body
+    /// the server already registered, which must never be rebuilt.
+    func appleAdsTokenFunnel(installEpochID: UUID) -> AppleAdsTokenFunnel? {
+        guard let stored = defaultsBox.value.data(forKey: Key.appleAdsTokenFunnel),
+              let funnel = try? attriKitJSONDecoder().decode(AppleAdsTokenFunnel.self, from: stored),
+              funnel.installEpochID == installEpochID else { return nil }
+        return funnel
+    }
+
+    func conversionValueState() -> ConversionValueState? {
+        guard let stored = defaultsBox.value.data(forKey: Key.conversionValues) else { return nil }
+        return try? attriKitJSONDecoder().decode(ConversionValueState.self, from: stored)
+    }
+
+    func setConversionValueState(_ state: ConversionValueState?) throws {
+        if let state {
+            defaultsBox.value.set(try attriKitJSONEncoder().encode(state), forKey: Key.conversionValues)
+        } else {
+            defaultsBox.value.removeObject(forKey: Key.conversionValues)
+        }
+    }
+
+    func setAppleAdsTokenFunnel(_ funnel: AppleAdsTokenFunnel?) throws {
+        if let funnel {
+            defaultsBox.value.set(try attriKitJSONEncoder().encode(funnel), forKey: Key.appleAdsTokenFunnel)
+        } else {
+            defaultsBox.value.removeObject(forKey: Key.appleAdsTokenFunnel)
+        }
     }
 
     /// Adds a consent transition to durable storage before any delivery is attempted.
@@ -779,6 +830,8 @@ actor SDKStorage {
         // erasure complete. It is keyed by install epoch, and the epoch above is gone, so nothing
         // could ever read it again either: it was unreachable data the user had asked us to delete.
         defaultsBox.value.removeObject(forKey: Key.firstOpenBody)
+        defaultsBox.value.removeObject(forKey: Key.appleAdsTokenFunnel)
+        defaultsBox.value.removeObject(forKey: Key.conversionValues)
         if let firstError { throw firstError }
     }
 

@@ -8,8 +8,39 @@ import UIKit
 protocol PlatformEvidenceProviding: Sendable {
     func appTransactionJWS() async -> String?
     func adServicesToken() async -> String?
+    /// The same collection, with how it ended. A bare nil could not tell "Apple has no token for
+    /// this install" from "the call failed" from "this platform has no AdServices", so a first-open
+    /// without `asa_token` said nothing about why, and the Apple Ads funnel could not be measured.
+    func adServicesTokenCollection() async -> AdServicesTokenCollection
     func coarseContext() -> CoarseContext
     func appVersion() -> String
+}
+
+extension PlatformEvidenceProviding {
+    /// Providers that only know the token (test doubles) report a token as collected and its
+    /// absence as unavailable.
+    func adServicesTokenCollection() async -> AdServicesTokenCollection {
+        let token = await adServicesToken()
+        return AdServicesTokenCollection(token: token, outcome: token == nil ? .unavailable : .collected, attempts: 1)
+    }
+}
+
+/// How one AdServices token collection ended.
+enum AdServicesTokenOutcome: String, Codable, Sendable {
+    /// `AAAttribution.attributionToken()` returned a token.
+    case collected
+    /// Every attempt threw: no token for this install from Apple, or an AdServices failure.
+    case unavailable
+    /// The platform has no AdServices framework (macOS, or a build without it).
+    case unsupported
+    /// The collection did not finish inside the first-open bound.
+    case timedOut = "timed_out"
+}
+
+struct AdServicesTokenCollection: Sendable {
+    let token: String?
+    let outcome: AdServicesTokenOutcome
+    let attempts: Int
 }
 
 struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
@@ -43,23 +74,34 @@ struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
     ///
     /// 250ms then 500ms is 750ms of sleeping inside a 2s budget, leaving room for three
     /// `AAAttribution.attributionToken()` calls. The bound and this ladder are ONE decision written
-    /// in two files: change either and the other has to move.
-    func adServicesToken() async -> String? {
+    /// in two files: change either and the other has to move (the bound is
+    /// `CoreRuntime.collectAdServicesToken`).
+    func adServicesTokenCollection() async -> AdServicesTokenCollection {
         #if os(iOS)
         let backoff: [Duration] = [.milliseconds(250), .milliseconds(500)]
+        var attempts = 0
         for attempt in 0..<3 {
-            guard !Task.isCancelled else { return nil }
-            if let token = await Self.attributionToken() { return token }
+            guard !Task.isCancelled else { break }
+            attempts += 1
+            if let token = await Self.attributionToken() {
+                return AdServicesTokenCollection(token: token, outcome: .collected, attempts: attempts)
+            }
             if attempt < backoff.count {
                 do {
                     try await Task.sleep(for: backoff[attempt])
                 } catch {
-                    return nil
+                    break
                 }
             }
         }
+        return AdServicesTokenCollection(token: nil, outcome: .unavailable, attempts: attempts)
+        #else
+        return AdServicesTokenCollection(token: nil, outcome: .unsupported, attempts: 0)
         #endif
-        return nil
+    }
+
+    func adServicesToken() async -> String? {
+        await adServicesTokenCollection().token
     }
 
     #if os(iOS)

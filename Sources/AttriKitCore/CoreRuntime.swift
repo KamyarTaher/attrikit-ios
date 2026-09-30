@@ -6,15 +6,15 @@ import BackgroundTasks
 import os
 #endif
 
-private final class EvidenceResultRace: @unchecked Sendable {
+private final class EvidenceResultRace<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<String?, Never>?
+    private var continuation: CheckedContinuation<Value?, Never>?
 
-    init(continuation: CheckedContinuation<String?, Never>) {
+    init(continuation: CheckedContinuation<Value?, Never>) {
         self.continuation = continuation
     }
 
-    func resolve(with result: String?) {
+    func resolve(with result: Value?) {
         lock.lock()
         guard let continuation else {
             lock.unlock()
@@ -23,6 +23,25 @@ private final class EvidenceResultRace: @unchecked Sendable {
         self.continuation = nil
         lock.unlock()
         continuation.resume(returning: result)
+    }
+}
+
+/// The installation id `AttriKit.installID` returns, readable from any thread. Only the runtime
+/// actor writes it, whenever the identity it measures under changes.
+final class EstablishedInstallationID: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UUID?
+
+    func get() -> UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ id: UUID?) {
+        lock.lock()
+        value = id
+        lock.unlock()
     }
 }
 
@@ -36,6 +55,10 @@ struct AttriKitTestingConfiguration: Sendable {
     let lifecycle: ApplicationLifecycleObserving
     let backgroundRetryScheduler: BackgroundRetryScheduler
     let diagnostic: @Sendable (String) -> Void
+    let conversionValues: ConversionValueUpdater
+    /// Every wait of the attribution poll. A seam so a test can move past the ladder's rungs (5 s up
+    /// to 6 h) and prove the poll stopped, which no test observing real time for a second can do.
+    let attributionPollSleep: @Sendable (Duration) async -> Void
 
     init(
         baseURL: URL,
@@ -46,8 +69,12 @@ struct AttriKitTestingConfiguration: Sendable {
         now: @escaping @Sendable () -> Date,
         lifecycle: ApplicationLifecycleObserving = ApplicationLifecycleObserver(),
         backgroundRetryScheduler: BackgroundRetryScheduler = .live,
-        diagnostic: @escaping @Sendable (String) -> Void = { AttriKitTestingConfiguration.logDiagnostic($0) }
+        diagnostic: @escaping @Sendable (String) -> Void = { AttriKitTestingConfiguration.logDiagnostic($0) },
+        conversionValues: ConversionValueUpdater = .live,
+        attributionPollSleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     ) {
+        self.conversionValues = conversionValues
+        self.attributionPollSleep = attributionPollSleep
         self.baseURL = baseURL
         self.transport = transport
         self.storage = storage
@@ -137,6 +164,11 @@ struct BackgroundRetryScheduler: Sendable {
     }
 }
 
+struct TimedAdServicesCollection: Sendable {
+    let collection: AdServicesTokenCollection
+    let latencyMilliseconds: Int
+}
+
 private struct BufferedEvent: Sendable {
     let event: AttriKitEvent
     let properties: [String: AttriKitValue]
@@ -173,14 +205,41 @@ actor CoreRuntime {
 
     private let configuration: AttriKitTestingConfiguration
     private var apiKey: String?
-    private var consent: AttriKitConsent = .unknown
-    private var identity: InstallationIdentity?
+    /// Republishes the installation id on every change: a withdrawal clears it here, before its
+    /// receipt is scheduled or delivered, and a grant shows the established id again.
+    private var consent: AttriKitConsent = .unknown {
+        didSet { publishEstablishedInstallationID() }
+    }
+    private var identity: InstallationIdentity? {
+        didSet { publishEstablishedInstallationID() }
+    }
+    /// What `AttriKit.installID` reads, from any thread. Written only here, from `identity`,
+    /// `consent` and `deletionPending`, so it is the id this runtime is measuring under at that
+    /// moment.
+    private let establishedInstallationID = EstablishedInstallationID()
     private var sessionID = UUID()
     private var bufferedBeforeStart: [BufferedEvent] = []
     private var pendingUserID: String?
     private var funnelIdentity = FunnelIdentity()
     private var exactToken: ExactTokenReference?
+    /// The LATEST answer, not the first. It used to be written once and returned for the life of
+    /// the process, and the poll stopped the moment anything was in it -- so the first answer, which
+    /// the server marks `provisional` for 72 hours, was the only one an app ever saw. An install
+    /// answered "organic, provisional" before its Apple Ads exchange or its link token had been
+    /// processed stayed organic on the device even after the server had matched it. Every write
+    /// now goes through `setAttributionCache`, which also tells `attributionUpdates()` subscribers.
     private var attributionCache: AttributionResult?
+    /// The poll gave up (window exhausted, or measurement networking lost) with NO answer. What
+    /// separates `timed_out` from `pending` in `attrkit_status`: both have an empty cache, and only
+    /// one of them will still change in this process.
+    private var attributionPollStopped = false
+    private var attributionObservers: [UUID: AsyncStream<AttributionUpdate>.Continuation] = [:]
+    private var lastPublishedAttribution: AttributionUpdate?
+    private var conversionSchema: AttriKitConversionSchema?
+    /// Chains every conversion-value update behind the previous one. The update suspends on
+    /// StoreKit, and actor reentrancy would otherwise let a second milestone read the state the
+    /// first has not written yet: two writers, and the later one could lower the value.
+    private var conversionChain: Task<Void, Never>?
     private var firstOpenTask: Task<Void, Never>?
     private var selectedFirstOpenBody: (installEpochID: UUID, consent: AttriKitConsent, body: Data)?
     /// Guards the slot against a STALE clear. submitFirstOpen can install a retry task into
@@ -237,12 +296,36 @@ actor CoreRuntime {
     private var pendingActivation: (startedAt: Date, epoch: Int, generation: Int)?
     private var lastSessionEndedAt: Date?
     private var lastSessionIndex: Int?
-    private var deletionPending = false
+    private var deletionPending = false {
+        didSet { publishEstablishedInstallationID() }
+    }
     private var activeNetworkRequestCount = 0
     private var networkQuiescenceWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(configuration: AttriKitTestingConfiguration) {
         self.configuration = configuration
+    }
+
+    /// The installation id in its WIRE spelling, lowercase. The server keys an install on an HMAC
+    /// of the exact string first-open carried (apps/link/src/ingestion/routes.ts, the
+    /// `deriveInstallationIdHmac(input.installation_id, ...)` write), and RevenueCat's
+    /// `app_user_id` fast path hashes the customer's string VERBATIM on the same derivation
+    /// (apps/link/src/revenuecat/postgres-queue.ts, `installation_id_fast_path`). `UUID.uuidString`
+    /// is uppercase, so handing that to an app would produce a join key that matches nothing.
+    ///
+    /// It is the id this runtime's own initialization established and is measuring under, never
+    /// one read from storage or created for the host: an accessor that did either was a second
+    /// identity decision, and every version of it found a state (a locked Keychain, UserDefaults
+    /// read empty before the first unlock, a consent wipe) where the two disagreed. Nil before
+    /// initialization, whenever consent does not allow measurement (from the moment it changes,
+    /// before any withdrawal receipt goes out), while a deletion is pending, and after a wipe.
+    nonisolated func hostInstallationID() -> String? {
+        establishedInstallationID.get()?.uuidString.lowercased()
+    }
+
+    private func publishEstablishedInstallationID() {
+        let measuring = consent.allowsMeasurement && !deletionPending
+        establishedInstallationID.set(measuring ? identity?.installationID : nil)
     }
 
     private enum DeletionTombstoneState {
@@ -268,6 +351,9 @@ actor CoreRuntime {
     }
 
     func start(apiKey: String, consent: AttriKitConsent) async {
+        // A subscriber that joined before start() saw `pending`; the consent it starts under is a
+        // state change of its own (`consent_required`, or still `pending` while first-open flies).
+        defer { publishAttributionIfChanged() }
         guard self.apiKey == nil else {
             if self.consent != consent { await setConsent(consent) }
             return
@@ -332,6 +418,7 @@ actor CoreRuntime {
     }
 
     func setConsent(_ newConsent: AttriKitConsent) async {
+        defer { publishAttributionIfChanged() }
         let previous = consent
         let previousIdentity = identity
         consent = newConsent
@@ -436,6 +523,59 @@ actor CoreRuntime {
         }
         guard !deletionPending, consent.allowsMeasurement, let identity else { return }
         await enqueue(event, properties: properties, occurredAt: now, identity: identity)
+        if let schema = conversionSchema,
+           let milestone = ConversionValuePlan.milestone(for: event, properties: properties, schema: schema) {
+            await applyConversion(milestone)
+        }
+    }
+
+    func configureConversionValues(_ schema: AttriKitConversionSchema) {
+        conversionSchema = schema
+    }
+
+    func recordConversion(_ milestone: AttriKitConversionMilestone) async {
+        await applyConversion(milestone)
+    }
+
+    private func applyConversion(_ milestone: AttriKitConversionMilestone) async {
+        let previous = conversionChain
+        let task = Task {
+            await previous?.value
+            await self.performConversion(milestone)
+        }
+        conversionChain = task
+        await task.value
+    }
+
+    private func performConversion(_ milestone: AttriKitConversionMilestone) async {
+        guard consent.allowsMeasurement, !deletionPending, let schema = conversionSchema else { return }
+        let stored = await configuration.storage.conversionValueState()
+        let planned = ConversionValuePlan.apply(
+            milestone,
+            to: stored ?? ConversionValueState(schemaVersion: schema.version),
+            schema: schema
+        )
+        var state = planned.state
+        let write = planned.write
+        if let stored, stored.schemaVersion != schema.version {
+            configuration.diagnostic(
+                "AttriKit: conversion schema v\(schema.version) is configured, but this install started under v\(stored.schemaVersion). Its conversion value is left as written, since the two schemas decode differently."
+            )
+        }
+        if let write {
+            do {
+                try await configuration.conversionValues.update(write)
+                state.writtenFine = write.fine
+                state.writtenCoarse = write.coarse
+                state.locked = write.lock
+            } catch {
+                configuration.diagnostic("AttriKit: the conversion value update to \(write.fine) was refused (\(error)). The next milestone retries it.")
+            }
+        }
+        // The update suspended on StoreKit. A revocation or deletion landing meanwhile has already
+        // wiped this state, and writing it back would resurrect data the user asked to erase.
+        guard consent.allowsMeasurement, !deletionPending else { return }
+        try? await configuration.storage.setConversionValueState(state)
     }
 
     func setSessionTrackingEnabled(_ enabled: Bool) async {
@@ -608,19 +748,89 @@ actor CoreRuntime {
         )
     }
 
+    /// The attribution state after waiting up to `timeout` for a first answer, as one value.
+    func attributionUpdate(timeout: Duration) async -> AttributionUpdate {
+        _ = await attribution(timeout: timeout)
+        return currentAttributionUpdate()
+    }
+
+    func currentAttributionUpdate() -> AttributionUpdate {
+        guard apiKey != nil else { return AttributionUpdate(status: .pending, attribution: nil) }
+        guard !deletionPending, consent.allowsMeasurement else {
+            return AttributionUpdate(status: .consentRequired, attribution: nil)
+        }
+        switch attributionCache {
+        case .attributed(let attribution):
+            return AttributionUpdate(status: attribution.status, attribution: attribution)
+        case .unattributed:
+            return AttributionUpdate(status: .organic, attribution: nil)
+        case .failed, .timedOut:
+            return AttributionUpdate(status: .timedOut, attribution: nil)
+        case .consentRequired:
+            return AttributionUpdate(status: .consentRequired, attribution: nil)
+        case .notStarted:
+            return AttributionUpdate(status: .pending, attribution: nil)
+        case nil:
+            return AttributionUpdate(status: attributionPollStopped ? .timedOut : .pending, attribution: nil)
+        }
+    }
+
+    func addAttributionObserver(_ id: UUID, _ continuation: AsyncStream<AttributionUpdate>.Continuation) {
+        // Publish first, so `lastPublishedAttribution` is the current state: a subscriber that
+        // joins before anything was ever published would otherwise receive the current state here
+        // and then again from the next publish.
+        publishAttributionIfChanged()
+        attributionObservers[id] = continuation
+        continuation.yield(currentAttributionUpdate())
+    }
+
+    func removeAttributionObserver(_ id: UUID) {
+        attributionObservers.removeValue(forKey: id)
+    }
+
+    /// Yields to every subscriber when the published state actually changed. A poll that re-reads
+    /// the same provisional answer every few seconds must not make an app re-run
+    /// `Superwall.setUserAttributes` every few seconds.
+    private func publishAttributionIfChanged() {
+        let update = currentAttributionUpdate()
+        guard update != lastPublishedAttribution else { return }
+        lastPublishedAttribution = update
+        for continuation in attributionObservers.values { continuation.yield(update) }
+    }
+
+    private func setAttributionCache(_ result: AttributionResult?) {
+        attributionCache = result
+        publishAttributionIfChanged()
+    }
+
     func attribution(timeout: Duration) async -> AttributionResult {
         guard apiKey != nil else { return .notStarted }
         guard !deletionPending else { return .failed }
         guard consent.allowsMeasurement else { return .consentRequired }
-        if let attributionCache { return attributionCache }
+        if let attributionCache { return Self.publicResult(attributionCache) }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while clock.now < deadline {
-            if let attributionCache { return attributionCache }
+            if let attributionCache { return Self.publicResult(attributionCache) }
             if Task.isCancelled { return .failed }
             try? await Task.sleep(for: .milliseconds(25))
         }
-        return attributionCache ?? .timedOut
+        return attributionCache.map(Self.publicResult) ?? .timedOut
+    }
+
+    /// What `attribution(timeout:)` reports for a cached answer.
+    ///
+    /// An organic install used to come back as `.attributed` with `method: "unattributed"`, so an
+    /// app testing `if case .attributed` treated every organic install as paid. It is `.unattributed`
+    /// now, and an install whose consent the server records as withdrawn is `.consentRequired`. The
+    /// cache itself keeps the full answer, because its finality decides whether the poll continues.
+    static func publicResult(_ cached: AttributionResult) -> AttributionResult {
+        guard case .attributed(let attribution) = cached else { return cached }
+        switch attribution.status {
+        case .organic: return .unattributed
+        case .consentRequired: return .consentRequired
+        default: return cached
+        }
     }
 
     func handle(_ url: URL) async -> DeepLinkResult {
@@ -752,7 +962,8 @@ actor CoreRuntime {
         pollTask = nil
         queueTask = nil
         consentReceiptTask = nil
-        attributionCache = nil
+        attributionPollStopped = false
+        setAttributionCache(nil)
         attributionETag = nil
         exactToken = nil
         funnelIdentity = FunnelIdentity()
@@ -783,9 +994,12 @@ actor CoreRuntime {
         // activation interleaved with the roundtrip before the lifecycle guards learned
         // about deletionPending.
         resetSessionState()
+        publishAttributionIfChanged()
     }
 
     func shutdown() async {
+        for continuation in attributionObservers.values { continuation.finish() }
+        attributionObservers.removeAll()
         configuration.lifecycle.stop()
         lifecycleObservationStarted = false
         applicationIsActive = false
@@ -801,7 +1015,7 @@ actor CoreRuntime {
         do {
             identity = try await configuration.storage.initializeIdentities()
         } catch {
-            attributionCache = .failed
+            setAttributionCache(.failed)
             return
         }
         guard let identity else { return }
@@ -814,6 +1028,12 @@ actor CoreRuntime {
         bufferedBeforeStart.removeAll()
         for buffered in pending {
             await enqueue(buffered.event, properties: buffered.properties, occurredAt: buffered.occurredAt, identity: identity)
+            // Replayed through the same milestone mapping as `track`: an app told to configure
+            // conversion values before `start` also tracks its first events before it.
+            if let schema = conversionSchema,
+               let milestone = ConversionValuePlan.milestone(for: buffered.event, properties: buffered.properties, schema: schema) {
+                await applyConversion(milestone)
+            }
         }
         await startOrResumeFirstOpen()
         scheduleQueueFlush()
@@ -924,13 +1144,15 @@ actor CoreRuntime {
                 consent: nil
             )
         }
+        if let stored = persistedBody,
+           let refreshed = await refreshedAppleAdsTokenBody(stored, identity: identity) {
+            persistedBody = refreshed
+        }
         // Platform evidence is best-effort and BOUNDED: AppTransaction.shared can hang on
         // simulators/sandboxes (it does not throw), and a slow StoreKit must never delay the
         // first-open envelope — click-to-install timing is the product's accuracy substrate.
         let evidence = configuration.evidence
         let deviceEvidence = configuration.deviceEvidence()
-        async let transaction = Self.boundedEvidence { await evidence.appTransactionJWS() }
-        async let adServices = Self.boundedEvidence { await evidence.adServicesToken() }
         // ONE consent snapshot builds the envelope AND records it below. `consent` was read twice
         // across the evidence suspension — once for the declared state, once for the idfa gate —
         // so a grant landing in that window built a body DECLARING measurement_granted while
@@ -939,12 +1161,23 @@ actor CoreRuntime {
         // snapshot is taken AFTER the awaits, so a withdrawal during them still drops the idfa.
         var producingConsent = consent
         var envelope: FirstOpenEnvelope?
+        var tokenCollection: TimedAdServicesCollection?
         if persistedBody == nil {
+            // Collected ONLY when a body is being built. These two `async let`s used to sit above
+            // this branch, and an `async let` starts its child the moment it is declared: every
+            // relaunch replaying a persisted body also made a network-backed AdServices call and
+            // an AppTransaction read whose results nothing used, and held this task open until
+            // the implicit await at scope exit, up to the 2-second bound after its request had
+            // already gone.
+            async let transaction = Self.boundedEvidence { await evidence.appTransactionJWS() }
+            async let adServices = Self.collectAdServicesToken(evidence)
             let occurredAt = configuration.now()
             let appVersion = configuration.evidence.appVersion()
             let coarseContext = configuration.evidence.coarseContext()
             let appTransactionJWS = await transaction
-            let asaToken = await adServices
+            let collected = await adServices
+            tokenCollection = collected
+            let asaToken = collected.collection.token
             producingConsent = consent
             envelope = FirstOpenEnvelope(
                 installationID: identity.installationID,
@@ -1008,13 +1241,19 @@ actor CoreRuntime {
                         installEpochID: identity.installEpochID,
                         consent: producingConsent
                     )
+                    if let tokenCollection {
+                        await recordAppleAdsTokenCollection(tokenCollection, epoch: identity.installEpochID)
+                    }
                     data = encoded
                 }
             } else {
                 return
             }
-            let request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
+            var request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/first-open", body: data, idempotencyKey: identity.installEpochID.uuidString.lowercased())
+            if let header = await appleAdsTokenHeader(epoch: identity.installEpochID) {
+                request.setValue(header, forHTTPHeaderField: Self.appleAdsTokenHeaderName)
+            }
             let submittedEpoch = identity.installEpochID
             let response = try await sendMeasurementRequest(request)
             guard consent.allowsMeasurement, !deletionPending else { return }
@@ -1025,6 +1264,11 @@ actor CoreRuntime {
             // then flush against an unregistered epoch, and the old attribution and identify
             // would be applied to the wrong install.
             guard self.identity?.installEpochID == submittedEpoch else { return }
+            // Every status that registers the epoch (below: 200, 202, 204, 409) also means the server
+            // now holds a body for it, so its Apple Ads token may no longer be refreshed.
+            if [200, 202, 204, 409].contains(response.statusCode) {
+                await acknowledgeAppleAdsToken(epoch: submittedEpoch)
+            }
             switch response.statusCode {
             // The gate opens on the STATUS, before any decoding. A 2xx means the server has
             // registered the epoch, and that — not the parseability of the body — is the fact the
@@ -1035,7 +1279,12 @@ actor CoreRuntime {
             case 200:
                 registerFirstOpen()
                 let decoded = try attriKitJSONDecoder().decode(FirstOpenResponse.self, from: response.data)
-                attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+                let answer = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+                setAttributionCache(answer)
+                // A match returned inline is the server's FIRST view, and it is provisional for 72
+                // hours: late Apple Ads, token and device evidence can still replace it. Nothing
+                // polled after a 200 before, so that first view was final on the device.
+                if Self.isProvisional(answer) { startPolling(after: Self.provisionalFirstPollDelayMilliseconds) }
                 try? await configuration.storage.setRetryState(nil)
 
             case 202:
@@ -1075,7 +1324,7 @@ actor CoreRuntime {
             // produce was undeliverable. The retry ladder is bounded (6 attempts inside 24h), so
             // retrying a genuinely bad key costs little and a transient blip costs nothing.
             case let code where Self.isPermanentClientFailure(code):
-                attributionCache = .failed
+                setAttributionCache(.failed)
                 try? await configuration.storage.setRetryState(nil)
                 // Does NOT open the gate. An earlier version of this fix did, on the reasoning that
                 // the events would then "drop loudly" — that reasoning was wrong, and two
@@ -1183,20 +1432,33 @@ actor CoreRuntime {
     private func startPolling(after milliseconds: Int) {
         pollTask?.cancel()
         let startedAt = configuration.now()
+        if attributionPollStopped {
+            attributionPollStopped = false
+            publishAttributionIfChanged()
+        }
         pollTask = Task {
-            if milliseconds > 0 { try? await Task.sleep(for: .milliseconds(milliseconds)) }
+            if milliseconds > 0 { await self.configuration.attributionPollSleep(.milliseconds(milliseconds)) }
             var fastDelay = 250
             var fastAttempts = 0
             var ladderIndex = 0
             while !Task.isCancelled, self.canUseNetwork() {
                 let serverCooldown = await self.pollAttributionOnce()
-                if self.hasAttributionResult() { return }
+                // Stops on a SETTLED answer only. A provisional one keeps the same ladder, so the
+                // cost of watching it is bounded exactly as the wait for a first answer is, and an
+                // unchanged answer is a 304 against the stored ETag.
+                if self.hasSettledAttributionResult() { return }
                 guard self.configuration.now().timeIntervalSince(startedAt) < Self.firstOpenRetryWindow else {
                     self.finishExhaustedPoll()
                     return
                 }
                 var delay: Int
-                if fastAttempts < Self.attributionPollFastAttempts,
+                // The fast ramp is for the wait for a FIRST answer. Once a provisional one is in
+                // hand, what can still change it (an Apple Ads exchange retrying, a late token, a
+                // device match) lands in seconds to minutes, which the 5s, 30s and 5m rungs catch;
+                // and every answer is provisional for 72 hours, so ramping on it would cost about
+                // twenty requests on every launch of every install for three days.
+                if self.attributionCache == nil,
+                   fastAttempts < Self.attributionPollFastAttempts,
                    self.configuration.now().timeIntervalSince(startedAt) < Self.attributionPollFastWindow {
                     delay = fastDelay
                     fastDelay = min(fastDelay * 2, Self.attributionPollFastCeiling)
@@ -1211,7 +1473,7 @@ actor CoreRuntime {
                 }
                 if let serverCooldown { delay = max(delay, serverCooldown) }
                 let jitter = Int.random(in: 0...max(1, delay / 4))
-                try? await Task.sleep(for: .milliseconds(delay + jitter))
+                await self.configuration.attributionPollSleep(.milliseconds(delay + jitter))
             }
             // Falling out of the loop is NOT always exhaustion. Cancellation is a deliberate stop
             // (shutdown, reset, a replacement poll) and stays quiet. Losing network permission is
@@ -1229,6 +1491,8 @@ actor CoreRuntime {
     /// but it must not be silent either.
     private func finishUnreachablePoll() {
         guard attributionCache == nil else { return }
+        attributionPollStopped = true
+        publishAttributionIfChanged()
         configuration.diagnostic(
             "AttriKit: attribution poll stopped because measurement networking is unavailable. The result stays UNKNOWN, not unattributed, and attribution(timeout:) will answer .timedOut."
         )
@@ -1245,6 +1509,8 @@ actor CoreRuntime {
     /// the give-up is logged so a lost match is diagnosable instead of silent.
     private func finishExhaustedPoll() {
         guard consent.allowsMeasurement, !deletionPending, attributionCache == nil else { return }
+        attributionPollStopped = true
+        publishAttributionIfChanged()
         #if canImport(os)
         os_log(
             .error,
@@ -1264,7 +1530,9 @@ actor CoreRuntime {
             switch response.statusCode {
             case 200:
                 let decoded = try attriKitJSONDecoder().decode(AttributionResponse.self, from: response.data)
-                attributionCache = decoded.attribution.map(AttributionResult.attributed) ?? .unattributed
+                // Not an answer yet: leave the cache and the validator alone and keep polling.
+                if decoded.isPending { break }
+                setAttributionCache(decoded.attribution.map(AttributionResult.attributed) ?? .unattributed)
                 // Retained only AFTER the body was applied. Stored before the decode, a 200 whose body
                 // fails to parse threw to `catch` with the ETag kept: the next poll's If-None-Match then
                 // earned a 304, which falls to `default: break`, so the cache stayed nil for the rest of
@@ -1274,7 +1542,7 @@ actor CoreRuntime {
                 // do not store a validator that stalls subsequent polls on 304.
                 if let etag = response.headers["etag"] { attributionETag = etag }
             case 204:
-                attributionCache = .unattributed
+                setAttributionCache(.unattributed)
             // `.failed` is a TERMINAL answer for this process: nothing clears the cache until the
             // app is relaunched, so the host shows "attribution failed" for the rest of the
             // session. It belongs only to a status that will still be wrong on the next launch.
@@ -1292,7 +1560,7 @@ actor CoreRuntime {
             // again. Deliberately asymmetric: a wrongly-permanent answer is unrecoverable within
             // the session, a wrongly-transient one costs another request.
             case 400:
-                attributionCache = .failed
+                setAttributionCache(.failed)
             default:
                 break
             }
@@ -1675,8 +1943,12 @@ actor CoreRuntime {
 
     /// Races a best-effort evidence provider against a wall-clock bound; nil on timeout.
     private static func boundedEvidence(seconds: Int = 2, _ operation: @escaping @Sendable () async -> String?) async -> String? {
+        await boundedResult(seconds: seconds) { await operation() } ?? nil
+    }
+
+    private static func boundedResult<Value: Sendable>(seconds: Int = 2, _ operation: @escaping @Sendable () async -> Value) async -> Value? {
         await withCheckedContinuation { continuation in
-            let race = EvidenceResultRace(continuation: continuation)
+            let race = EvidenceResultRace<Value>(continuation: continuation)
             Task {
                 race.resolve(with: await operation())
             }
@@ -1685,6 +1957,143 @@ actor CoreRuntime {
                 race.resolve(with: nil)
             }
         }
+    }
+
+    /// One AdServices collection under the first-open bound, with how it ended and how long it took.
+    /// The 2-second bound is the one `ApplePlatformEvidenceProvider.adServicesTokenCollection`'s
+    /// ladder is sized to fit; change either and the other has to move.
+    private static func collectAdServicesToken(_ evidence: PlatformEvidenceProviding) async -> TimedAdServicesCollection {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let collection = await boundedResult { await evidence.adServicesTokenCollection() }
+            ?? AdServicesTokenCollection(token: nil, outcome: .timedOut, attempts: 0)
+        let elapsed = started.duration(to: clock.now).components
+        let milliseconds = Int(elapsed.seconds) * 1_000 + Int(elapsed.attoseconds / 1_000_000_000_000_000)
+        return TimedAdServicesCollection(collection: collection, latencyMilliseconds: milliseconds)
+    }
+
+    /// Apple: the token "has a 24-hour TTL", and "If the POST API call exceeds 24 hours, a 404
+    /// response returns" (https://developer.apple.com/documentation/adservices, read 2026-09-30). A
+    /// body waiting in the retry ladder can outlive it: the ladder runs for 24 hours, and a device
+    /// offline at install sends first-open whenever it comes back. The worker then exhausts its 404
+    /// retries (apps/worker/src/matching/rails.ts, `asa_not_retrievable_after_retries`) and the one
+    /// deterministic Apple Ads rail for the install is gone. An hour of margin under the TTL covers
+    /// the time between this check, the send, and the worker's exchange.
+    static let appleAdsTokenRefreshAge: TimeInterval = 23 * 3_600
+
+    /// A replacement for a persisted body whose Apple Ads token has aged out, or whose collection
+    /// timed out, while the server has never acknowledged it. Nil means "send the stored bytes".
+    ///
+    /// Only an UNACKNOWLEDGED body is ever rebuilt. Once the server has it, the stored bytes are
+    /// what a relaunch must repeat to get a clean `duplicate`, and the server exchanged the token
+    /// while it was fresh. A body with no funnel record (built by an SDK before this one) is never
+    /// rebuilt either, because nothing says whether the server already holds it.
+    ///
+    /// `occurred_at` and every other field are kept: only the token changes. Rebuilding with a new
+    /// `occurred_at` would move the install instant by up to a day, and click-to-install timing is
+    /// what matching reads.
+    private func refreshedAppleAdsTokenBody(_ body: Data, identity: InstallationIdentity) async -> Data? {
+        let epoch = identity.installEpochID
+        guard var funnel = await configuration.storage.appleAdsTokenFunnel(installEpochID: epoch),
+              funnel.acknowledgedAt == nil,
+              let stored = try? attriKitJSONDecoder().decode(FirstOpenEnvelope.self, from: body) else { return nil }
+        let now = configuration.now()
+        let stale: Bool
+        if stored.asaToken != nil {
+            stale = now.timeIntervalSince(funnel.tokenCollectedAt ?? stored.occurredAt) >= Self.appleAdsTokenRefreshAge
+        } else {
+            stale = funnel.outcome == .timedOut
+        }
+        guard stale else { return nil }
+        let timed = await Self.collectAdServicesToken(configuration.evidence)
+        // The collection suspended: the stored body must still be this epoch's, under this consent.
+        guard consent.allowsMeasurement, !deletionPending,
+              self.identity?.installEpochID == epoch,
+              stored.consent.state == consent else { return nil }
+        funnel.attemptedAt = now
+        guard let token = timed.collection.token else {
+            // The outcome stays the one of the token the body still carries: the header must
+            // describe the bytes it travels with, not a refresh that produced nothing. A body with
+            // no token records the new outcome, which is what a repeated timeout looks like.
+            if stored.asaToken == nil {
+                funnel.outcome = timed.collection.outcome
+                funnel.attempts = timed.collection.attempts
+                funnel.latencyMilliseconds = timed.latencyMilliseconds
+            }
+            try? await configuration.storage.setAppleAdsTokenFunnel(funnel)
+            return nil
+        }
+        funnel.outcome = timed.collection.outcome
+        funnel.attempts = timed.collection.attempts
+        funnel.latencyMilliseconds = timed.latencyMilliseconds
+        let rebuilt = FirstOpenEnvelope(
+            installationID: stored.installationID,
+            installEpochID: stored.installEpochID,
+            occurredAt: stored.occurredAt,
+            appVersion: stored.appVersion,
+            coarseContext: stored.coarseContext,
+            consent: stored.consent,
+            appTransactionJWS: stored.appTransactionJWS,
+            asaToken: token,
+            exactTokenReference: stored.exactTokenReference,
+            webFirstParty: stored.webFirstParty,
+            idfa: stored.idfa,
+            idfv: stored.idfv,
+            localLineagePresent: stored.localLineagePresent,
+            localEpochPresent: stored.localEpochPresent
+        )
+        guard let data = try? attriKitJSONEncoder().encode(rebuilt) else { return nil }
+        try? await configuration.storage.setFirstOpenBody(data, installEpochID: epoch, consent: stored.consent.state)
+        selectedFirstOpenBody = (installEpochID: epoch, consent: stored.consent.state, body: data)
+        funnel.tokenCollectedAt = now
+        try? await configuration.storage.setAppleAdsTokenFunnel(funnel)
+        return data
+    }
+
+    /// The collection outcome of the body being sent, as a request header. A header rather than a
+    /// body field on purpose: `firstOpenEnvelopeSchema` is `.strict()`, so a new body key would
+    /// 422 against every server deployed before it, and a 422 is a permanent first-open refusal.
+    /// A header is ignored by a server that does not read it.
+    private func appleAdsTokenHeader(epoch: UUID) async -> String? {
+        guard let funnel = await configuration.storage.appleAdsTokenFunnel(installEpochID: epoch) else { return nil }
+        return "outcome=\(funnel.outcome.rawValue);attempts=\(funnel.attempts);latency_ms=\(funnel.latencyMilliseconds)"
+    }
+
+    static let appleAdsTokenHeaderName = "X-AttriKit-ASA-Token"
+
+    /// Records a fresh collection for a body just built, and says out loud when there is no token.
+    private func recordAppleAdsTokenCollection(_ timed: TimedAdServicesCollection, epoch: UUID) async {
+        // Reached after the evidence awaits: a wipe in that window rotated the epoch or started a
+        // deletion, and this record must not reappear behind it.
+        guard !deletionPending, identity?.installEpochID == epoch else { return }
+        let now = configuration.now()
+        try? await configuration.storage.setAppleAdsTokenFunnel(AppleAdsTokenFunnel(
+            installEpochID: epoch,
+            outcome: timed.collection.outcome,
+            attempts: timed.collection.attempts,
+            latencyMilliseconds: timed.latencyMilliseconds,
+            attemptedAt: now,
+            tokenCollectedAt: timed.collection.token == nil ? nil : now,
+            acknowledgedAt: nil
+        ))
+        guard timed.collection.outcome != .collected else { return }
+        configuration.diagnostic(
+            "AttriKit: the first-open carries no Apple Ads token (\(timed.collection.outcome.rawValue) after \(timed.collection.attempts) attempt(s), \(timed.latencyMilliseconds) ms). An install from an Apple Ads tap cannot be matched deterministically without it."
+        )
+    }
+
+    private func acknowledgeAppleAdsToken(epoch: UUID) async {
+        guard var funnel = await configuration.storage.appleAdsTokenFunnel(installEpochID: epoch),
+              funnel.acknowledgedAt == nil,
+              !deletionPending, identity?.installEpochID == epoch else { return }
+        funnel.acknowledgedAt = configuration.now()
+        try? await configuration.storage.setAppleAdsTokenFunnel(funnel)
+    }
+
+    func appleAdsTokenStatus() async -> AppleAdsTokenStatus? {
+        guard let identity else { return nil }
+        return await configuration.storage.appleAdsTokenFunnel(installEpochID: identity.installEpochID)
+            .map(AppleAdsTokenStatus.init(funnel:))
     }
 
     private func stopAndWipe(finalizeRevocation: Bool) async {
@@ -1701,7 +2110,8 @@ actor CoreRuntime {
         pollTask = nil
         queueTask = nil
         consentReceiptTask = nil
-        attributionCache = nil
+        attributionPollStopped = false
+        setAttributionCache(nil)
         attributionETag = nil
         identity = nil
         sessionID = UUID()
@@ -1738,6 +2148,12 @@ actor CoreRuntime {
             erasureSucceeded = false
             configuration.diagnostic("AttriKit: first-open erasure failed during consent revocation: \(error)")
         }
+        // Describes the epoch that was just rotated away; read by epoch, so it could never be
+        // reached again, and it is dropped with the body it described.
+        try? await configuration.storage.setAppleAdsTokenFunnel(nil)
+        // What this install did in the app, kept only to raise its conversion value: measurement
+        // has just stopped, so nothing may raise it again.
+        try? await configuration.storage.setConversionValueState(nil)
         if finalizeRevocation && erasureSucceeded {
             do {
                 _ = try await configuration.storage.finishRevocationTransition()
@@ -1748,7 +2164,22 @@ actor CoreRuntime {
     }
 
     private func canUseNetwork() -> Bool { consent.allowsMeasurement && !deletionPending }
-    private func hasAttributionResult() -> Bool { attributionCache != nil }
+    /// An answer the server will not revise: anything but a provisional match (or provisional
+    /// organic answer). `.failed` is settled because the route's only permanent refusal is a
+    /// malformed epoch id this build will keep sending.
+    private func hasSettledAttributionResult() -> Bool {
+        guard let attributionCache else { return false }
+        return !Self.isProvisional(attributionCache)
+    }
+
+    static func isProvisional(_ result: AttributionResult) -> Bool {
+        guard case .attributed(let attribution) = result else { return false }
+        return attribution.isProvisional
+    }
+
+    /// The first re-read after an inline provisional answer. The server's own default
+    /// `retry_after_ms` for a pending first-open (apps/link/src/ingestion/routes.ts) is 500.
+    static let provisionalFirstPollDelayMilliseconds = 500
 
     private func eventConsent() -> EventConsent {
         EventConsent(

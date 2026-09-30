@@ -15,18 +15,23 @@ In Xcode, choose **File > Add Package Dependencies** and enter:
 https://github.com/KamyarTaher/attrikit-ios
 ```
 
-Select `AttriKitCore`. Add `AttriKitTracking` only when the app requests ATT and add
-`AttriKitLinkToken` only when it explicitly consumes a deferred-link token.
+Select `AttriKitCore`. Add `AttriKitTracking` only when the app requests ATT,
+`AttriKitLinkToken` only when it explicitly consumes a deferred-link token, and
+`AttriKitSuperwall` only when it forwards Superwall paywall views.
 
 For a package manifest:
 
 ```swift
 dependencies: [
-    // 2.2.1 restores the privacy manifests' empty tracking-domain lists; 2.2.0
-    // could block ingest and erasure when ATT was not authorized.
-    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.2.1"),
+    // 2.5.0 adds installID, userAttributes, attributionUpdates and AttriKitSuperwall.
+    // Every version from 2.2.1 restores the privacy manifests' empty tracking-domain
+    // lists; 2.2.0 could block ingest and erasure when ATT was not authorized.
+    .package(url: "https://github.com/KamyarTaher/attrikit-ios", from: "2.5.0"),
 ]
 ```
+
+Upgrading from 2.4.x? Read `CHANGELOG.md` first: `attribution(timeout:)` now answers an organic
+install with `.unattributed`, and the first answer is no longer frozen for the process.
 
 ## Core setup
 
@@ -89,12 +94,39 @@ use — with RevenueCat, pass the app user id:
 AttriKit.setUserID(Purchases.shared.appUserID)
 ```
 
+Or the other way round: hand AttriKit's own installation id to your backend. `AttriKit.installID`
+is the installation id the SDK is measuring under, spelled exactly as AttriKit sends it
+(lowercase). A RevenueCat webhook whose `app_user_id` equals it is joined to the install directly,
+and the same value works as Stripe checkout metadata or on your own user record. It is the id
+AttriKit's own `start` established, never one read or created on the side, so it always matches
+what the SDK sends: `nil` until `start` has run with measurement consent, `nil` while a
+`deleteData()` request is pending, and `nil` whenever consent does not allow measurement
+(unknown, denied or revoked), from the moment consent changes. `start` returns
+before it has run, so read it with `await AttriKit.installID()`:
+
+```swift
+AttriKit.start(apiKey: "YOUR_PUBLISHABLE_KEY", consent: .measurementGranted)
+Task {
+    let installID = await AttriKit.installID()
+    Purchases.configure(withAPIKey: "appl_…", appUserID: installID)
+}
+```
+
+It changes only when AttriKit's own measurement does: a reinstall that did not keep the Keychain, a
+completed deletion, or a launch whose Keychain could not be read.
+
 Read how the install was attributed (method, network, campaign, finality) to
 personalize onboarding or paywall placements:
 
 ```swift
 let result = await AttriKit.attribution(timeout: .seconds(2))
 ```
+
+An organic install answers `.unattributed`, and `.attributed` carries the campaign together with
+`adsetID`, `adID`, `campaignName`, `networkCampaignID` and, for a device match, `confidence`, as far
+as the server has them. The first answer is `provisional` for 72 hours: the SDK keeps asking while
+it is (5s, 30s, 5m, 1h, 3h, 6h after it arrives), so an install first answered organic can become
+attributed. Subscribe to every change with `AttriKit.attributionUpdates()`.
 
 Campaign-link tokens (`ak1_…`) make attribution deterministic when they reach the SDK
 through a universal link or an explicit, consented pasteboard read. The public token
@@ -115,8 +147,10 @@ accepted but matching is still pending, the attribution poll is bounded the same
 long as a `Retry-After` header asks (clamped to six hours), and once the schedule is exhausted or the
 ~24h window closes it stops and leaves the result UNKNOWN: `attribution(timeout:)` answers
 `.timedOut`, never `.unattributed`. Exhaustion means AttriKit stopped asking, not that the install
-had no attribution, and the answer is cached for the process lifetime, so claiming the stronger of
-the two would make a match that had simply not landed yet permanently wrong. Event batches
+had no attribution, so claiming the stronger of the two would make a match that had simply not
+landed yet wrong until the next launch asks again. A `provisional` answer keeps the poll running on
+the ladder rungs (the 250ms ramp is only for the wait for a first answer); a settled one ends it.
+Event batches
 flush immediately after enqueue, retrying with backoff starting at one second and
 capped at one minute. The full wire
 contract lives at https://attrikit.io/en/docs/ingest-api.
@@ -148,19 +182,111 @@ AttriKit.setSessionTrackingEnabled(false)
 
 ## Campaign-personalized paywalls
 
-Resolve deterministic campaign context before the first campaign-sensitive placement and pass
-the returned dictionary as placement parameters or user attributes. The bridge is vendor-neutral,
-so it works with Superwall without linking Superwall into AttriKitCore:
+Hand attribution to Superwall as user attributes, and refresh them when the answer changes. The
+bridge is vendor-neutral, so it works without linking Superwall into AttriKitCore:
+
+```swift
+import AttriKitCore
+import SuperwallKit
+
+// At launch, after AttriKit.start and Superwall.configure.
+Task {
+    for await update in AttriKit.attributionUpdates() {
+        // Every later placement can target user.attrkit_status, user.attrkit_network, ...
+        Superwall.shared.setUserAttributes(update.userAttributes)
+    }
+}
+```
+
+`userAttributes` always carries `attrkit_status`: `attributed`, `device_matched`, `organic`,
+`pending`, `consent_required` or `timed_out`, so a context without a campaign still says why.
+`attrkit_finality` follows once the server answered. A deterministic match adds
+`attrkit_method`, `attrkit_network`, `attrkit_campaign_id`, `attrkit_source_type`, and, when the
+server has them, `attrkit_campaign_name`, `attrkit_network_campaign_id`, `attrkit_adset_id` and
+`attrkit_ad_id`. Every other `attrkit_` key is present with a `nil` value: Superwall's
+`setUserAttributes` merges and removes a key set to `nil`, so a key from an earlier answer (the ad
+set of a provisional Meta match that Apple Ads replaced, or a campaign from before consent was
+withdrawn) never stays on the user. The dictionary is `[String: String?]` and passes to
+`setUserAttributes` as is. The stream publishes only real changes, starting with the current state.
+`AttriKit.userAttributes(timeout:)` answers the same dictionary once.
+
+`AttriKit.placementParameters(timeout:)` keeps its contract: those campaign keys for a
+deterministic match, and an empty dictionary for anything else, so `isEmpty` still means "no
+verified campaign":
 
 ```swift
 let parameters = await AttriKit.placementParameters(timeout: .seconds(2))
 Superwall.shared.register(placement: "onboarding_paywall", params: parameters)
 ```
 
-The dictionary can contain `attrkit_method`, `attrkit_network`, `attrkit_campaign_id`, and
-`attrkit_source_type`. It is empty for unresolved, organic, device-matched, modeled, or otherwise
-non-deterministic attribution. AttriKit never turns a probabilistic campaign estimate into a
-user-level paywall decision.
+Neither dictionary carries a campaign for unresolved, organic, matched, modeled, or otherwise
+non-deterministic attribution ("matched" being a device match). AttriKit never turns
+a modeled campaign estimate or a probabilistic match into a user-level paywall decision;
+`attrkit_status` says `device_matched` so you can still see one arrived.
+
+To record paywall views, add the `AttriKitSuperwall` product and forward Superwall's events. It
+does not depend on SuperwallKit: conform Superwall's event type once, in your own target.
+
+```swift
+import AttriKitSuperwall
+import SuperwallKit
+
+extension SuperwallEventInfo: AttriKitSuperwallEventConvertible {
+    public var attriKitSuperwallEvent: AttriKitSuperwallEvent {
+        if case .paywallOpen(let paywall) = event {
+            return AttriKitSuperwallEvent(
+                name: event.description,
+                paywallIdentifier: paywall.identifier,
+                placement: paywall.presentedByPlacementWithName
+            )
+        }
+        return AttriKitSuperwallEvent(name: event.description)
+    }
+}
+
+// In your SuperwallDelegate:
+func handleSuperwallEvent(withInfo eventInfo: SuperwallEventInfo) {
+    AttriKitSuperwall.handle(eventInfo)
+}
+```
+
+A paywall open becomes the canonical `paywall_viewed` event (sent to ad networks as
+`ViewContent`). Superwall's `transaction_complete` is deliberately not recorded as a purchase: it
+is an unverified client callback, and with RevenueCat connected the purchase would count twice.
+
+## Apple Ads token
+
+The first-open carries Apple's AdServices token when iOS provides one inside the 2-second
+first-open bound. `AttriKit.appleAdsTokenStatus()` says how its collection ended (`collected`,
+`unavailable`, `unsupported`, `timed_out`) and whether the first-open carrying it was delivered;
+the same outcome travels to AttriKit as the `X-AttriKit-ASA-Token` request header. Apple's token
+expires after 24 hours, so a first-open that waited that long in the retry schedule is sent with a
+fresh one, and a collection that timed out is tried again on the next attempt, both only while the
+server has not yet received the first-open.
+
+## Conversion values (SKAdNetwork and AdAttributionKit)
+
+Make AttriKit the single writer of your conversion values:
+
+```swift
+let schema = try AttriKitConversionSchema(
+    version: 1,
+    revenueThresholds: [5, 10, 20, 50],   // cumulative revenue, in `currency`
+    currency: "USD",
+    activationEvent: "onboarding_completed"
+)
+AttriKit.configureConversionValues(schema)   // before AttriKit.start
+```
+
+Fine values are 0 for an install, 1 for activation, 2 for a trial, then one per revenue bucket
+from 3 (any revenue) upward; coarse values are `low` once engaged, `medium` for a trial, `high` once
+paid. Tracked events raise the value by themselves: the activation event, `trial_started` or
+`intro_started`, and `purchase`, `purchase_completed`, `subscription_started` or
+`subscription_renewed` with a numeric `value` and the schema's `currency`. Revenue AttriKit cannot
+see on the device can be added with `AttriKit.recordConversion(.revenue(9.99))`. Values only ever
+go up, and the window locks at the top bucket. Do not call SKAdNetwork or AdAttributionKit update
+APIs yourself: a second writer overwrites these values, and the postback decodes against the wrong
+schema. The update goes through SKAdNetwork, which Apple mirrors into AdAttributionKit.
 
 ## App Tracking Transparency (optional)
 
