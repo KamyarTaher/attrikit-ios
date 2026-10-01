@@ -219,6 +219,8 @@ actor SDKStorage {
         static let appleAdsTokenFunnel = "io.attrikit.apple-ads-token-funnel"
         static let conversionValues = "io.attrikit.conversion-values"
         static let manualDMAConsent = "io.attrikit.manual-dma-consent"
+        static let serverConsent = "io.attrikit.server-consent"
+        static let deliveredIDFA = "io.attrikit.delivered-idfa"
     }
 
     private static let maxConsumedTokens = 128
@@ -549,6 +551,65 @@ actor SDKStorage {
         }
     }
 
+    private struct EpochValue<Value: Codable>: Codable {
+        let installEpochID: UUID
+        let value: Value
+    }
+
+    private func epochValue<Value: Codable>(_ type: Value.Type, key: String, installEpochID: UUID) -> Value? {
+        guard let stored = defaultsBox.value.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(EpochValue<Value>.self, from: stored),
+              decoded.installEpochID == installEpochID else { return nil }
+        return decoded.value
+    }
+
+    private func setEpochValue<Value: Codable>(_ value: Value?, key: String, installEpochID: UUID) {
+        if let value, let encoded = try? JSONEncoder().encode(EpochValue(installEpochID: installEpochID, value: value)) {
+            defaultsBox.value.set(encoded, forKey: key)
+        } else {
+            defaultsBox.value.removeObject(forKey: key)
+        }
+    }
+
+    /// The consent the server holds for this epoch's occurrence, as far as this device has seen it
+    /// acknowledged: the consent a first-open answered 2xx declared, then each acknowledged receipt.
+    /// Nil when nothing was ever acknowledged for this epoch, which is not the same as "unchanged":
+    /// a first-open answered 409 registered a body this device cannot see.
+    func serverConsent(installEpochID: UUID) -> AttriKitConsent? {
+        epochValue(AttriKitConsent.self, key: Key.serverConsent, installEpochID: installEpochID)
+    }
+
+    func setServerConsent(_ consent: AttriKitConsent, installEpochID: UUID) {
+        setEpochValue(consent, key: Key.serverConsent, installEpochID: installEpochID)
+    }
+
+    /// What a first-open the server stored says, written in one step: the consent it declares and,
+    /// when it carried one, the IDFA the server kept with it.
+    func recordRegisteredFirstOpen(consent: AttriKitConsent, idfaDigest: String?, installEpochID: UUID) {
+        setServerConsent(consent, installEpochID: installEpochID)
+        if let idfaDigest { setDeliveredIDFADigest(idfaDigest, installEpochID: installEpochID) }
+    }
+
+    /// SHA-256 of the IDFA the server holds for this epoch, so a delivered IDFA is not sent again
+    /// on every launch and one the user reset is. A digest, so this record is not a second copy of
+    /// the identifier. Kept across a downgrade to measurement, because the server keeps the IDFA
+    /// then too; erased with a denial, a revocation and a deletion.
+    func deliveredIDFADigest(installEpochID: UUID) -> String? {
+        epochValue(String.self, key: Key.deliveredIDFA, installEpochID: installEpochID)
+    }
+
+    func setDeliveredIDFADigest(_ digest: String?, installEpochID: UUID) {
+        setEpochValue(digest, key: Key.deliveredIDFA, installEpochID: installEpochID)
+    }
+
+    func clearDeliveredIDFA() {
+        defaultsBox.value.removeObject(forKey: Key.deliveredIDFA)
+    }
+
+    #if DEBUG
+    static let serverConsentKeyForTesting = Key.serverConsent
+    #endif
+
     /// Adds a consent transition to durable storage before any delivery is attempted.
     ///
     /// The stable idempotency key survives a crash after the server accepts the receipt but before
@@ -557,6 +618,36 @@ actor SDKStorage {
         var receipts = try consentReceipts()
         receipts.append(receipt)
         defaultsBox.value.set(try attriKitJSONEncoder().encode(receipts), forKey: Key.consentReceipts)
+    }
+
+    /// Appends `receipt` only when it is owed: when the consent the server will hold for its epoch,
+    /// once the receipts already queued for it are delivered, is not `receipt.state`, and never over
+    /// a revocation, which is final for its epoch. Decided and appended in one step on this actor,
+    /// because a consent transition and the drain's reconciliation can both raise the receipt one
+    /// change needs, and two that each read the queue before the other appended sent it twice.
+    ///
+    /// `holdingTrackingWithdrawal` leaves a tracking_granted the server holds in place for a
+    /// measurement_granted declared only by `start` (see CoreRuntime.consentDeclaredOnlyByStart).
+    func enqueueConsentReceiptIfOwed(_ receipt: StoredConsentReceipt, holdingTrackingWithdrawal: Bool = false) throws -> Bool {
+        var receipts = try consentReceipts()
+        let queued = receipts.last {
+            $0.installationID == receipt.installationID && $0.installEpochID == receipt.installEpochID
+        }
+        let held = queued?.state ?? serverConsent(installEpochID: receipt.installEpochID)
+        guard held != receipt.state, held != .revoked else { return false }
+        if holdingTrackingWithdrawal, held == .trackingGranted, receipt.state == .measurementGranted { return false }
+        // A change into or out of tracking_granted is a tracking receipt, whatever raised it.
+        let scope = receipt.state == .trackingGranted || held == .trackingGranted ? "tracking" : receipt.scope
+        receipts.append(StoredConsentReceipt(
+            idempotencyKey: receipt.idempotencyKey,
+            installationID: receipt.installationID,
+            installEpochID: receipt.installEpochID,
+            scope: scope,
+            state: receipt.state,
+            occurredAt: receipt.occurredAt
+        ))
+        defaultsBox.value.set(try attriKitJSONEncoder().encode(receipts), forKey: Key.consentReceipts)
+        return true
     }
 
     func nextConsentReceipt(deliverGrants: Bool = true) throws -> StoredConsentReceipt? {
@@ -848,6 +939,8 @@ actor SDKStorage {
         defaultsBox.value.removeObject(forKey: Key.appleAdsTokenFunnel)
         defaultsBox.value.removeObject(forKey: Key.conversionValues)
         defaultsBox.value.removeObject(forKey: Key.manualDMAConsent)
+        defaultsBox.value.removeObject(forKey: Key.serverConsent)
+        defaultsBox.value.removeObject(forKey: Key.deliveredIDFA)
         if let firstError { throw firstError }
     }
 

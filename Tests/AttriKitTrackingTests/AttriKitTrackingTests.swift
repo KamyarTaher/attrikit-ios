@@ -82,6 +82,47 @@ final class AttriKitTrackingTests: XCTestCase {
         )
     }
 
+    /// The integration the tracking module documents for an app already measuring: ask for ATT,
+    /// then pass the answer to setConsent. requestConsent's own identify leaves while the SDK still
+    /// holds measurement consent, and the server keeps an IDFA only for an occurrence a tracking
+    /// receipt has made tracking_granted, so the IDFA reaches it only in an identify sent after
+    /// that receipt was applied. Before, none was sent in that launch.
+    func testRequestConsentThenSetConsentDeliversTheIDFAInTheSameLaunch() async {
+        let idfa = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        AttriKitTracking.configureForTesting(GrantingTrackingSystem(idfa: idfa))
+        let server = TrackingConsentServer()
+        let suiteName = "AttriKitTrackingTests.\(UUID())"
+        defaultsSuiteNames.append(suiteName)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AttriKitTrackingTests-\(UUID())")
+        temporaryDirectories.append(directory)
+        await AttriKit.configureForTesting(AttriKitTestingConfiguration(
+            baseURL: URL(string: "https://unit.test")!,
+            transport: server,
+            storage: SDKStorage(
+                defaults: .init(value: UserDefaults(suiteName: suiteName)!),
+                keychain: TrackingMemoryKeychain(),
+                directory: directory
+            ),
+            evidence: TrackingEvidence(),
+            deviceEvidence: { AttriKit.currentDeviceEvidence() },
+            now: { Date() },
+            lifecycle: TrackingLifecycle()
+        ))
+        AttriKit.start(apiKey: String(repeating: "k", count: 20), consent: .measurementGranted)
+        let registered = await waitUntil { await server.registered }
+        XCTAssertTrue(registered, "first-open never registered")
+
+        let consent = await AttriKitTracking.requestConsent()
+        XCTAssertEqual(consent, .trackingGranted)
+        AttriKit.setConsent(consent)
+
+        let delivered = await waitUntil(timeout: .seconds(5)) { await server.keptIDFA != nil }
+        let kept = await server.keptIDFA
+        XCTAssertTrue(delivered, "no identify reached the server after the tracking receipt")
+        XCTAssertEqual(kept, idfa.uuidString.lowercased())
+    }
+
     func testRequestConsentWaitsUntilApplicationIsActiveBeforeRequestingATT() async {
         let system = CountingTrackingSystem(status: .authorized)
         let applicationActivation = ManualApplicationActivation(active: false)
@@ -186,6 +227,65 @@ private actor TrackingWireTransport: HTTPTransport {
 
     func identifyCount() -> Int { identifyRequests }
     func latestIdentifyBody() -> Data? { latestIdentify }
+}
+
+/// One install as the server sees it (apps/link/src/ingestion/repository.ts): first-open registers
+/// it under the consent it declares, a receipt replaces that consent, and an identify's IDFA is
+/// kept only while the consent is tracking_granted.
+private actor TrackingConsentServer: HTTPTransport {
+    private(set) var registered = false
+    private(set) var keptIDFA: String?
+    private var consentClass = "unknown"
+
+    func send(_ request: URLRequest) async throws -> HTTPResult {
+        let path = request.url?.path ?? ""
+        let json = request.httpBody
+            .flatMap { try? JSONSerialization.jsonObject(with: Self.gunzip($0)) as? [String: Any] } ?? [:]
+        let state = (json["consent"] as? [String: Any])?["state"] as? String
+        switch path {
+        case "/v1/ingest/first-open":
+            if !registered {
+                registered = true
+                consentClass = state ?? "unknown"
+                if consentClass == "tracking_granted" { keptIDFA = json["idfa"] as? String }
+            }
+        case "/v1/ingest/consent":
+            guard registered, let state else { return Self.unknownEpoch }
+            consentClass = state
+        case "/v1/ingest/identify":
+            guard registered else { return Self.unknownEpoch }
+            if consentClass == "tracking_granted", let idfa = json["idfa"] as? String { keptIDFA = idfa }
+        default:
+            break
+        }
+        return HTTPResult(
+            statusCode: 200,
+            data: Data(#"{"receipt_id":"tracking-wire","status":"matched","attribution":{"method":"deterministic","network":"meta","campaign_id":"campaign","finality":"final","policy_version":1}}"#.utf8),
+            headers: [:]
+        )
+    }
+
+    private static let unknownEpoch = HTTPResult(
+        statusCode: 503,
+        data: Data(#"{"error":"unknown_install_epoch"}"#.utf8),
+        headers: [:]
+    )
+
+    /// The SDK writes one stored-deflate gzip member; this reads exactly that shape.
+    private static func gunzip(_ data: Data) -> Data {
+        guard data.count >= 18, data[0] == 0x1f, data[1] == 0x8b else { return data }
+        var index = 10
+        var output = Data()
+        while index < data.count - 8 {
+            let final = data[index] & 0x01 == 1
+            let length = Int(data[index + 1]) | (Int(data[index + 2]) << 8)
+            index += 5
+            output.append(data.subdata(in: index..<(index + length)))
+            index += length
+            if final { break }
+        }
+        return output
+    }
 }
 
 private final class GrantingTrackingSystem: TrackingSystemProviding, @unchecked Sendable {

@@ -1,5 +1,51 @@
 # AttriKit for iOS: changes
 
+## 2.6.1 (2026-10-01)
+
+### Fixed
+
+- An IDFA granted after first-open never reached AttriKit, or reached it only on a later launch
+  that happened to send an identify. AttriKit keeps an identify's IDFA only for an install it holds
+  as tracking-consented, and an install keeps its first-open's consent until a consent receipt
+  changes it. Three paths changed the consent without sending a receipt:
+  - `start(apiKey:consent:)` with a consent other than the previous launch's, which is what an app
+    does when it passes its ATT answer to `start` on every launch and never calls `setConsent`;
+  - `start(consent: .unknown)` followed by `setConsent(.trackingGranted)`;
+  - a grant after a denial in the same install epoch (only a revocation starts a new epoch).
+
+  The SDK now records the consent AttriKit has acknowledged for the install and sends a receipt
+  whenever its own consent differs from it. A revoked epoch is never granted again.
+- `setConsent(.trackingGranted)` after `AttriKitTracking.requestConsent()` sent the tracking
+  receipt and no identify after it. The identify `requestConsent()` triggers leaves before the app
+  passes the answer on, so it carries no IDFA. The SDK now sends the IDFA in an identify once
+  AttriKit has acknowledged the tracking receipt, in the same launch, so an identify that reached
+  AttriKit before the receipt is followed by one that arrives after it.
+- A tracking withdrawal passed only to `start` on a later launch (ATT turned off in Settings) left
+  AttriKit holding the install as tracking-consented. The receipt now goes out when the app first
+  leaves the foreground. It waits until then because many apps start every launch with
+  `.measurementGranted` and pass the ATT answer to `setConsent` once running: a tracking grant made
+  in that time replaces the withdrawal, and nothing is sent. A `setConsent` ends the wait: a
+  `.measurementGranted` repeating `start`'s goes out at once, as do `.denied` and `.revoked`, while
+  `.unknown` sends nothing, as before.
+- A receipt raised while the receipt queue was draining could wait for the next foreground: the
+  request to drain was dropped because a drain was running. The running drain now runs once more.
+
+### Changed (read before upgrading)
+
+- No request body changed. An install upgraded from an earlier version sends at most one consent
+  receipt on its first launch and, under tracking consent, one identify after it carrying the IDFA,
+  because no earlier version recorded what AttriKit holds. That also repairs installs the defects
+  above already affected. An IDFA already delivered is not sent again on later launches; one the
+  user reset is.
+- Two small records are kept in the SDK's `UserDefaults`: the consent AttriKit acknowledged for the
+  install epoch, and a SHA-256 digest of the IDFA it holds. The digest is kept when tracking is
+  withdrawn, because AttriKit keeps the IDFA then too; it is removed by a denial or a revocation,
+  and both records are removed by `deleteData()`.
+
+### Unchanged
+
+- No IDFA is ever sent without tracking consent.
+
 ## 2.6.0 (2026-10-01)
 
 ### Added

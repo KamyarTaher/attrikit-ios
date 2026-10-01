@@ -345,9 +345,30 @@ the next active state before invoking Apple's ATT prompt and records that wait i
 never returns Apple's all-zero sentinel. `AttriKitTracking.vendorIdentifier` exposes
 IDFV without requiring ATT. Once the tracking module has been used, AttriKit forwards
 IDFV and, only when authorized, IDFA in the first-open payload and later identify
-payloads. If core measurement was already started, the resolved identifiers are
-forwarded in an identify payload instead. On macOS, ATT is unavailable and
-`requestConsent()` returns `.unknown`.
+payloads. On macOS, ATT is unavailable and `requestConsent()` returns `.unknown`.
+
+If measurement already started under `.measurementGranted`, for example when the app asks for
+ATT after onboarding, pass the answer to AttriKit once you have it:
+
+```swift
+let trackingConsent = await AttriKitTracking.requestConsent()
+if trackingConsent == .trackingGranted {
+    AttriKit.setConsent(.trackingGranted)
+}
+```
+
+AttriKit keeps an IDFA only for an install it holds as tracking-consented, so the SDK first sends
+a tracking consent receipt and sends the IDFA in an identify payload once AttriKit has accepted
+that receipt, in the same launch. Passing the answer only to `start(apiKey:consent:)` on a later
+launch works the same way.
+
+On later launches, passing the ATT answer to `start` sends nothing more once AttriKit holds it. An
+app that instead starts every launch with `.measurementGranted` and passes the grant to
+`setConsent` once running also sends nothing. A `.measurementGranted` given to `start` for an
+install AttriKit holds as tracking-consented is held until the app calls `setConsent` or first
+leaves the foreground: a tracking grant passed to `setConsent` replaces it, and otherwise it is sent
+as a withdrawal, which is also how AttriKit learns that ATT was turned off in Settings. No IDFA is
+sent while consent is not `.trackingGranted`.
 
 The tracking and link-token module manifests carry no `NSPrivacyTracking` and no
 `NSPrivacyTrackingDomains` key, because the SDK cannot know the runtime `AttriKitEndpoint`

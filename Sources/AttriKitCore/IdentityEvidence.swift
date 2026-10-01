@@ -4,6 +4,11 @@ import Foundation
 struct DeviceEvidence: Codable, Equatable, Sendable {
     let idfa: UUID?
     let idfv: UUID?
+
+    /// How the device records which IDFA the server holds, without keeping a second copy of it.
+    static func digest(_ idfa: UUID) -> String {
+        FunnelIdentity.sha256(idfa.uuidString.lowercased())
+    }
 }
 
 struct FunnelIdentity: Equatable, Sendable {

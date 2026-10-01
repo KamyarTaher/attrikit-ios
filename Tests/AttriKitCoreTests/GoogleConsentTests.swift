@@ -75,7 +75,7 @@ final class GoogleConsentTests: XCTestCase {
 
     func testGoogleAsVendorMustBeAllowed() throws {
         XCTAssertEqual(
-            TCFConsent.dmaConsent(from: try defaults(purposes: [1, 3, 4, 7], vendors: [754, 756])),
+            TCFConsent.dmaConsent(from: try defaults(purposes: [1, 3, 4, 7], purposeInterests: [7], vendors: [754, 756], vendorInterests: [755])),
             DMAConsent(eea: true, adUserData: false, adPersonalization: false, source: .tcf)
         )
     }

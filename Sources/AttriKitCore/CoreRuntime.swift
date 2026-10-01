@@ -269,6 +269,14 @@ actor CoreRuntime {
     private var firstOpenRegistered = false
     private var consentReceiptTask: Task<Void, Never>?
     private var consentReceiptTaskGeneration = 0
+    private var consentReceiptDrainRequested = false
+    /// The consent was set by `start` and no `setConsent` has followed in this foreground. Apps
+    /// commonly start every launch with `.measurementGranted` and pass the ATT answer to setConsent
+    /// once the app is running; on an install the server holds as tracking_granted, sending that
+    /// start's withdrawal and then the re-grant cost two receipts and an identify on every launch,
+    /// recording a change the user never made. A tracking withdrawal declared only by start is
+    /// therefore held until the app leaves the foreground, when start's consent stands.
+    private var consentDeclaredOnlyByStart = false
     /// An identify raised before registration. Only a flag, not a queue: identify always posts the
     /// CURRENT user id, funnel identity, token and device evidence, so one replay after
     /// registration carries everything the intermediate calls would have.
@@ -385,6 +393,7 @@ actor CoreRuntime {
         self.apiKey = apiKey
         manualDMA = await configuration.storage.manualDMAConsent()
         self.consent = consent
+        consentDeclaredOnlyByStart = true
         startLifecycleObservation()
         switch await deletionTombstoneState() {
         case .none:
@@ -427,6 +436,9 @@ actor CoreRuntime {
         let previous = consent
         let previousIdentity = identity
         consent = newConsent
+        // An explicit answer ends start's hold.
+        let endsStartHold = consentDeclaredOnlyByStart
+        consentDeclaredOnlyByStart = false
         if newConsent == .revoked {
             let startsRevocation = !deletionPending && previous != .revoked
             if previous.allowsMeasurement, let previousIdentity {
@@ -475,7 +487,13 @@ actor CoreRuntime {
         if !previous.allowsMeasurement {
             await beginMeasurement()
         } else if previous != newConsent {
-            await scheduleConsentReceipt(scope: "tracking", state: newConsent)
+            await scheduleConsentReceipt(scope: "tracking", state: newConsent, onlyIfOwed: true)
+        } else if endsStartHold {
+            // A setConsent repeating start's value raises no receipt of its own, and the drain that
+            // compared start's consent with the server may already have run and held its withdrawal.
+            // Only here: the other paths raise their own receipt and drain, and a kick before a
+            // withdrawal's own drain made it a second delivery attempt.
+            scheduleConsentReceiptDrain()
         }
     }
 
@@ -747,6 +765,7 @@ actor CoreRuntime {
         // Bumped before the early-returns below: backgrounding happened whether or not there was
         // a session to close, and a start parked mid-flight has to be able to see it.
         foregroundEpoch &+= 1
+        releaseTrackingWithdrawalHeldForStart()
         guard sessionTrackingEnabled, consent.allowsMeasurement, !deletionPending,
               let identity, let activeSession else { return }
 
@@ -953,6 +972,9 @@ actor CoreRuntime {
 
     func refreshTrackingEvidence() async {
         await submitIdentify()
+        // An IDFA that just became available is sent by the drain once the server holds this
+        // epoch as tracking_granted; the identify above reaches it only if it already does.
+        scheduleConsentReceiptDrain()
     }
 
     func deleteData() async throws {
@@ -1085,6 +1107,7 @@ actor CoreRuntime {
     }
 
     private func applicationWillTerminate() async {
+        releaseTrackingWithdrawalHeldForStart()
         if activeSession != nil { await applicationWillResignActive() }
         guard canUseNetwork() else { return }
         _ = await flushQueueOnce()
@@ -1277,6 +1300,8 @@ actor CoreRuntime {
             } else {
                 return
             }
+            let builtInThisProcess = selectedFirstOpenBody?.installEpochID == identity.installEpochID
+                && selectedFirstOpenBody?.body == data
             var request = RequestFactory(baseURL: configuration.baseURL, apiKey: apiKey)
                 .post(path: "v1/ingest/first-open", body: data, idempotencyKey: identity.installEpochID.uuidString.lowercased())
             if let header = await appleAdsTokenHeader(epoch: identity.installEpochID) {
@@ -1294,6 +1319,10 @@ actor CoreRuntime {
             guard self.identity?.installEpochID == submittedEpoch else { return }
             // Every status that registers the epoch (below: 200, 202, 204, 409) also means the server
             // now holds a body for it, so its Apple Ads token may no longer be refreshed.
+            // Before registerFirstOpen, whose drain reads it to decide whether a receipt is owed.
+            if builtInThisProcess, [200, 202, 204].contains(response.statusCode) {
+                await recordRegisteredFirstOpen(data, epoch: submittedEpoch)
+            }
             if [200, 202, 204, 409].contains(response.statusCode) {
                 await acknowledgeAppleAdsToken(epoch: submittedEpoch)
             }
@@ -1398,6 +1427,17 @@ actor CoreRuntime {
 
     @discardableResult
     private func submitIdentify() async -> IdentifyOutcome {
+        // Read BEFORE the request leaves, and before the checks below so they stay the last ones
+        // ahead of the send. A receipt is recorded only once the server has applied it, so an
+        // identify sent after this reads tracking_granted arrives after that receipt and its IDFA
+        // is kept; read after the send, a receipt acknowledged while this identify was in flight
+        // would mark an IDFA the server discarded as delivered.
+        // A wipe or epoch rotation landing in this read sets `consent` before its first suspension,
+        // so the guard below already returns for it.
+        var serverKeepsIDFA = false
+        if let epoch = identity?.installEpochID {
+            serverKeepsIDFA = await configuration.storage.serverConsent(installEpochID: epoch) == .trackingGranted
+        }
         guard consent.allowsMeasurement, !deletionPending, let apiKey, let identity else { return .notAttempted }
         // identify mutates an occurrence rather than creating one, so before registration the
         // server can only answer unknown_install_epoch — and this call discards its response
@@ -1453,6 +1493,10 @@ actor CoreRuntime {
         // outcome of the send that actually carried the token.
         if delivered, let spent = exactToken {
             _ = await configuration.storage.consumeExactTokenIfNew(spent.token)
+        }
+        // Not after a denial or revocation wiped the record while this identify was in flight.
+        if delivered, serverKeepsIDFA, consent.allowsMeasurement, let sent = envelope.idfa?.wrappedValue {
+            await configuration.storage.setDeliveredIDFADigest(DeviceEvidence.digest(sent), installEpochID: identity.installEpochID)
         }
         return delivered ? .delivered : .failed
     }
@@ -1784,7 +1828,9 @@ actor CoreRuntime {
         scope: String,
         state: AttriKitConsent,
         identity receiptIdentity: InstallationIdentity? = nil,
-        startDrain: Bool = true
+        startDrain: Bool = true,
+        onlyIfOwed: Bool = false,
+        holdingTrackingWithdrawal: Bool = false
     ) async {
         guard !deletionPending, apiKey != nil else { return }
         guard state != .unknown else { return }
@@ -1801,7 +1847,14 @@ actor CoreRuntime {
             occurredAt: configuration.now()
         )
         do {
-            try await configuration.storage.enqueueConsentReceipt(receipt)
+            if onlyIfOwed {
+                guard try await configuration.storage.enqueueConsentReceiptIfOwed(
+                    receipt,
+                    holdingTrackingWithdrawal: holdingTrackingWithdrawal
+                ) else { return }
+            } else {
+                try await configuration.storage.enqueueConsentReceipt(receipt)
+            }
         } catch {
             configuration.diagnostic(
                 "AttriKit: a consent receipt could not be persisted, so delivery was not attempted. Error: \(error)"
@@ -1819,11 +1872,21 @@ actor CoreRuntime {
         // so no drain was scheduled for a withdrawal the drain would have delivered.
         let mayDrainWithdrawal = consent.allowsMeasurement || consent == .denied || consent == .revoked
         guard mayDrainGrant || mayDrainWithdrawal else { return }
-        guard consentReceiptTask == nil else { return }
+        guard consentReceiptTask == nil else {
+            // The running drain may already have read the queue, or the registration and consent
+            // that gate it, before this call changed them; dropping the request left a receipt
+            // raised now, or the first grant registration made deliverable, waiting for the next
+            // foreground. It runs once more instead.
+            consentReceiptDrainRequested = true
+            return
+        }
         consentReceiptTaskGeneration += 1
         let generation = consentReceiptTaskGeneration
         consentReceiptTask = Task {
-            await self.drainConsentReceipts()
+            repeat {
+                self.consentReceiptDrainRequested = false
+                await self.drainConsentReceipts()
+            } while self.consentReceiptDrainRequested
             self.clearConsentReceiptTask(generation: generation)
         }
     }
@@ -1831,6 +1894,11 @@ actor CoreRuntime {
     /// Drains the oldest eligible receipt. A withdrawal can bypass a grant that is gated while
     /// consent is off. Each receipt stays stored until a 2xx acknowledgement, and a relaunch reuses
     /// the same idempotency key after a crash or failed attempt.
+    ///
+    /// Once registered it first raises any receipt the server still needs (reconcileServerConsent),
+    /// and once the queue is empty it sends the IDFA the server can now keep (deliverIDFAIfDue).
+    /// Both live here because this drain is the one serial path receipts travel: an identify sent
+    /// from anywhere else can reach the server before the tracking receipt it depends on.
     private func drainConsentReceipts() async {
         guard !deletionPending, let apiKey else { return }
         for _ in 0..<Self.maximumConsentReceiptsPerDrain {
@@ -1838,9 +1906,84 @@ actor CoreRuntime {
             let deliverGrants = consent.allowsMeasurement && firstOpenRegistered
             let deliverWithdrawals = consent.allowsMeasurement || consent == .denied || consent == .revoked
             guard deliverGrants || deliverWithdrawals else { return }
-            guard let receipt = await nextConsentReceipt(deliverGrants: deliverGrants) else { return }
+            if deliverGrants { await reconcileServerConsent() }
+            guard let receipt = await nextConsentReceipt(deliverGrants: deliverGrants) else {
+                await deliverIDFAIfDue()
+                return
+            }
             guard await deliverConsentReceipt(receipt, apiKey: apiKey, deliverWithdrawals: deliverWithdrawals) else { return }
         }
+    }
+
+    /// Raises a receipt when the consent the server will hold for this epoch, once the receipts
+    /// already queued for it are delivered, is not the SDK's. The server keeps an identify's IDFA
+    /// only for an occurrence it holds as tracking_granted, and an occurrence holds its first-open's
+    /// consent until a receipt changes it; a 409 first-open changes nothing.
+    ///
+    /// Decided from state, not from a transition, because three paths changed the consent without
+    /// one: `start` with a consent other than the stored one (an app passing its ATT answer to start
+    /// on every launch), `start(consent: .unknown)` followed by a grant (stored as unknown, so the
+    /// grant read as a first one), and a re-grant after a denial in the same epoch. A server
+    /// consent this device never saw acknowledged (a 409, a lost answer, a device upgraded from a
+    /// build that kept no record) counts as different, so it costs at most one receipt.
+    ///
+    /// Whether a receipt is owed is decided where it is appended (enqueueConsentReceiptIfOwed), which
+    /// counts the receipts already queued for the epoch, so a transition setConsent is raising at
+    /// the same moment is not sent twice, and never grants over a revocation: revocation rotates
+    /// the epoch precisely so that later consent cannot relink activity across it, while a denial
+    /// keeps the epoch and the server lets a later receipt override it.
+    private func reconcileServerConsent() async {
+        guard consent.allowsMeasurement, firstOpenRegistered, !deletionPending else { return }
+        // "measurement" unless the change is into or out of tracking_granted, which the append
+        // relabels "tracking": only it knows what the server will hold.
+        await scheduleConsentReceipt(
+            scope: "measurement",
+            state: consent,
+            startDrain: false,
+            onlyIfOwed: true,
+            holdingTrackingWithdrawal: consentDeclaredOnlyByStart
+        )
+    }
+
+    /// The app left the foreground without a setConsent, so `start`'s consent stands: a tracking
+    /// withdrawal it declared, held until now, is sent.
+    private func releaseTrackingWithdrawalHeldForStart() {
+        guard consentDeclaredOnlyByStart else { return }
+        consentDeclaredOnlyByStart = false
+        scheduleConsentReceiptDrain()
+    }
+
+    /// Sends the IDFA once the server is known to hold this epoch as tracking_granted and does not
+    /// already hold this IDFA. Before this, a grant made after first-open raised its receipt and
+    /// sent no identify after it, and the identify `AttriKitTracking.requestConsent()` triggers
+    /// leaves before the host passes the answer to setConsent: the IDFA reached the server only on
+    /// a later launch that happened to send an identify, and never on most.
+    private func deliverIDFAIfDue() async {
+        guard consent.allowsTracking, firstOpenRegistered, !deletionPending, let identity,
+              let idfa = configuration.deviceEvidence().idfa else { return }
+        // The registration's own identify (a stored user id) carries the IDFA too and records it.
+        if let identifyTask { await identifyTask.value }
+        let epoch = identity.installEpochID
+        guard await configuration.storage.serverConsent(installEpochID: epoch) == .trackingGranted,
+              await configuration.storage.deliveredIDFADigest(installEpochID: epoch) != DeviceEvidence.digest(idfa) else { return }
+        await submitIdentify()
+    }
+
+    /// What a first-open built in this process tells the device once the server has stored it: the
+    /// epoch is registered under the consent the body declares, and holds the IDFA it carried when
+    /// that consent is tracking_granted. A body replayed from an earlier process says nothing about
+    /// receipts sent since it was built, and a 409 says only that some other body is stored, so
+    /// neither is read.
+    private func recordRegisteredFirstOpen(_ body: Data, epoch: UUID) async {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let state = ((object["consent"] as? [String: Any])?["state"] as? String)
+                .flatMap(AttriKitConsent.init(rawValue:)) else { return }
+        let idfa = state == .trackingGranted ? (object["idfa"] as? String).flatMap(UUID.init(uuidString:)) : nil
+        await configuration.storage.recordRegisteredFirstOpen(
+            consent: state,
+            idfaDigest: idfa.map(DeviceEvidence.digest),
+            installEpochID: epoch
+        )
     }
 
     private func nextConsentReceipt(deliverGrants: Bool) async -> StoredConsentReceipt? {
@@ -1860,6 +2003,9 @@ actor CoreRuntime {
             let outcome = try await sendMeasurementRequest(request)
             guard (200..<300).contains(outcome.statusCode) else { configuration.diagnostic("AttriKit: consent receipt for scope '\(receipt.scope)' was not acknowledged (HTTP \(outcome.statusCode)). It remains queued."); return false }
             try await configuration.storage.acknowledgeConsentReceipt(idempotencyKey: receipt.idempotencyKey)
+            // Recorded for the receipt's own epoch, whatever the runtime holds now: a withdrawal
+            // delivered while measurement is off is exactly what a later re-grant must undo.
+            await configuration.storage.setServerConsent(receipt.state, installEpochID: receipt.installEpochID)
             return true
         } catch {
             configuration.diagnostic("AttriKit: consent receipt for scope '\(receipt.scope)' was not delivered. It remains queued. Error: \(error)")
@@ -2182,6 +2328,7 @@ actor CoreRuntime {
         // What this install did in the app, kept only to raise its conversion value: measurement
         // has just stopped, so nothing may raise it again.
         try? await configuration.storage.setConversionValueState(nil)
+        await configuration.storage.clearDeliveredIDFA()
         if finalizeRevocation && erasureSucceeded {
             do {
                 _ = try await configuration.storage.finishRevocationTransition()
