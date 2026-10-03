@@ -1,6 +1,6 @@
 import Foundation
 
-let attriKitSDKVersion = "2.6.1"
+let attriKitSDKVersion = "2.7.0"
 
 struct ConsentPayload: Codable, Sendable {
     let state: AttriKitConsent
@@ -57,6 +57,55 @@ struct CoarseContext: Codable, Sendable {
         case osMajor = "os_major"
         case deviceClass = "device_class"
         case locale
+    }
+}
+
+/// What the device says about itself, for matching a first open to the ad click that preceded it
+/// (`device_signals` on the wire, packages/shared `deviceSignalsSchema`). Each value is in the form
+/// the click side reports it: the hardware model as Facebook's `FBDV` and Instagram's user agent
+/// write it (`iPhone15,2`), the IANA time zone a landing page reads from `Intl`, and the screen in
+/// points with its scale, which are Safari's CSS pixels and `devicePixelRatio`. Android has sent the
+/// same object since its first release; before 2.7.0 iOS sent none, so an iOS install could only be
+/// matched on its IP, timing and language.
+///
+/// The envelope is validated `.strict()` and a 422 is permanent, so a value outside the server's
+/// caps is dropped here rather than sent: 128 characters, sides 1...16384, scale above 0 up to 8.
+struct DeviceSignals: Codable, Equatable, Sendable {
+    struct Screen: Codable, Equatable, Sendable {
+        let w: Int
+        let h: Int
+        let scale: Double
+    }
+
+    static let textMaxLength = 128
+    static let screenMaxSide = 16_384
+    static let screenMaxScale = 8.0
+
+    let deviceModel: String?
+    let timezone: String?
+    let screen: Screen?
+
+    init(deviceModel: String?, timezone: String?, screen: Screen?) {
+        self.deviceModel = Self.bounded(deviceModel)
+        self.timezone = Self.bounded(timezone)
+        self.screen = screen.flatMap { value in
+            let sides = 1...Self.screenMaxSide
+            let scaleValid = value.scale.isFinite && value.scale > 0 && value.scale <= Self.screenMaxScale
+            return sides.contains(value.w) && sides.contains(value.h) && scaleValid ? value : nil
+        }
+    }
+
+    var isEmpty: Bool { deviceModel == nil && timezone == nil && screen == nil }
+
+    private static func bounded(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty, trimmed.count <= textMaxLength else { return nil }
+        return trimmed
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceModel = "device_model"
+        case timezone, screen
     }
 }
 
@@ -121,6 +170,9 @@ struct FirstOpenEnvelope: Codable, Sendable {
     let idfv: LowercaseUUID?
     let localLineagePresent: Bool
     let localEpochPresent: Bool
+    /// Optional with a default so a body persisted by an earlier version decodes, and nil is omitted
+    /// from the JSON, so an envelope without it is byte-identical to 2.6.1's.
+    var deviceSignals: DeviceSignals? = nil
     /// Constant by construction, and that is a gap rather than a decision. `let` with an
     /// initializer is excluded from the synthesized memberwise initializer, so no call site can
     /// set it and `local_signals_conflict` is `false` in every envelope this SDK will ever send --
@@ -148,6 +200,7 @@ struct FirstOpenEnvelope: Codable, Sendable {
         case localLineagePresent = "local_lineage_present"
         case localEpochPresent = "local_epoch_present"
         case localSignalsConflict = "local_signals_conflict"
+        case deviceSignals = "device_signals"
     }
 }
 

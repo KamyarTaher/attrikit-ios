@@ -1,5 +1,27 @@
 # AttriKit for iOS: changes
 
+## 2.7.0 (2026-10-03)
+
+### Added
+
+- The first open now carries `device_signals`: the hardware model (`iPhone15,2`), the IANA time
+  zone and the screen in points with its scale. AttriKit compares them with the ad click that came
+  before the install, where Facebook's and Instagram's in-app browsers report the same model and a
+  landing page reports the same time zone and screen. Before this release an iOS install could be
+  matched to a click only on its IP address, timing and language, so a phone that changed network
+  between the click and the first open (Wi-Fi to cellular) was rarely matched. Android has sent
+  these values, with its OS build and languages, since its first release.
+
+### Changed (read before upgrading)
+
+- The first-open body gains the `device_signals` key. AttriKit has accepted it since July 2026, so no
+  server change is needed. A body persisted by an earlier version is re-sent as it
+  was, without the key.
+
+### Unchanged
+
+- No IDFA is ever sent without tracking consent.
+
 ## 2.6.1 (2026-10-01)
 
 ### Fixed

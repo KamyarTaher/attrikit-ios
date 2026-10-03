@@ -1248,7 +1248,8 @@ actor CoreRuntime {
                 idfa: producingConsent.allowsTracking ? deviceEvidence.idfa.map(LowercaseUUID.init(wrappedValue:)) : nil,
                 idfv: deviceEvidence.idfv.map(LowercaseUUID.init(wrappedValue:)),
                 localLineagePresent: identity.localLineagePresent,
-                localEpochPresent: identity.localEpochPresent
+                localEpochPresent: identity.localEpochPresent,
+                deviceSignals: configuration.evidence.deviceSignals()
             )
         }
         do {
@@ -2214,7 +2215,8 @@ actor CoreRuntime {
             idfa: stored.idfa,
             idfv: stored.idfv,
             localLineagePresent: stored.localLineagePresent,
-            localEpochPresent: stored.localEpochPresent
+            localEpochPresent: stored.localEpochPresent,
+            deviceSignals: stored.deviceSignals
         )
         guard let data = try? attriKitJSONEncoder().encode(rebuilt) else { return nil }
         try? await configuration.storage.setFirstOpenBody(data, installEpochID: epoch, consent: stored.consent.state)

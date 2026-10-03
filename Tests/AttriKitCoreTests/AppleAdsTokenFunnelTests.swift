@@ -87,6 +87,7 @@ final class AppleAdsTokenFunnelTests: XCTestCase {
         let storage = makeStorage()
         let clock = TestDateClock()
         let evidence = ScriptedTokenEvidence(["token-stale", "token-fresh"])
+        evidence.signals = DeviceSignals(deviceModel: "iPhone15,2", timezone: "Europe/Paris", screen: .init(w: 390, h: 844, scale: 3))
         let failing = StubTransport { _, _ in HTTPResult(statusCode: 503, data: Data(), headers: [:]) }
 
         let first = launch(storage: storage, transport: failing, evidence: evidence, clock: clock)
@@ -97,6 +98,9 @@ final class AppleAdsTokenFunnelTests: XCTestCase {
         await first.shutdown()
 
         clock.advance(by: 23.5 * 3_600)
+        // The second launch's provider has nothing to say, so signals in the refreshed body can only
+        // have come from the stored one.
+        evidence.signals = nil
         let accepting = StubTransport { _, _ in successResult(status: 202, body: #"{"receipt_id":"r","status":"pending","retry_after_ms":60000}"#) }
         let second = launch(storage: storage, transport: accepting, evidence: evidence, clock: clock)
         await second.start(apiKey: apiKey, consent: .measurementGranted)
@@ -109,6 +113,9 @@ final class AppleAdsTokenFunnelTests: XCTestCase {
         XCTAssertEqual(refreshed["asa_token"] as? String, "token-fresh", "an expired token was sent")
         XCTAssertEqual(refreshed["occurred_at"] as? String, original["occurred_at"] as? String, "the install instant moved")
         XCTAssertEqual(refreshed["installation_id"] as? String, original["installation_id"] as? String)
+        let originalSignals = try XCTUnwrap(original["device_signals"] as? [String: Any])
+        let refreshedSignals = try XCTUnwrap(refreshed["device_signals"] as? [String: Any], "the token refresh dropped the device signals")
+        XCTAssertEqual(refreshedSignals as NSDictionary, originalSignals as NSDictionary)
 
         let status = await second.appleAdsTokenStatus()
         XCTAssertNotNil(status?.deliveredAt)
@@ -184,6 +191,14 @@ private final class ScriptedTokenEvidence: PlatformEvidenceProviding, @unchecked
     }
 
     var calls: Int { lock.lock(); defer { lock.unlock() }; return count }
+
+    /// What `deviceSignals()` answers; a test changes it between launches.
+    private var reportedSignals: DeviceSignals?
+    var signals: DeviceSignals? {
+        get { lock.lock(); defer { lock.unlock() }; return reportedSignals }
+        set { lock.lock(); reportedSignals = newValue; lock.unlock() }
+    }
+    func deviceSignals() -> DeviceSignals? { signals }
 
     func appTransactionJWS() async -> String? { nil }
     func adServicesToken() async -> String? { await adServicesTokenCollection().token }

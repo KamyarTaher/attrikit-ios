@@ -13,10 +13,14 @@ protocol PlatformEvidenceProviding: Sendable {
     /// without `asa_token` said nothing about why, and the Apple Ads funnel could not be measured.
     func adServicesTokenCollection() async -> AdServicesTokenCollection
     func coarseContext() -> CoarseContext
+    /// nil when the platform has nothing to say; test doubles inherit that default.
+    func deviceSignals() -> DeviceSignals?
     func appVersion() -> String
 }
 
 extension PlatformEvidenceProviding {
+    func deviceSignals() -> DeviceSignals? { nil }
+
     /// Providers that only know the token (test doubles) report a token as collected and its
     /// absence as unavailable.
     func adServicesTokenCollection() async -> AdServicesTokenCollection {
@@ -169,6 +173,43 @@ struct ApplePlatformEvidenceProvider: PlatformEvidenceProviding {
         }
         return CoarseContext(countryCode: country, osMajor: os, deviceClass: deviceClass, locale: locale)
     }
+
+    func deviceSignals() -> DeviceSignals? {
+        #if os(iOS)
+        let screen = onMainThread { () -> DeviceSignals.Screen in
+            let screen = UIScreen.main
+            return DeviceSignals.Screen(
+                w: Int(screen.bounds.width.rounded()),
+                h: Int(screen.bounds.height.rounded()),
+                scale: Double(screen.scale)
+            )
+        }
+        let signals = DeviceSignals(
+            deviceModel: Self.hardwareModel(),
+            timezone: TimeZone.current.identifier,
+            screen: screen
+        )
+        return signals.isEmpty ? nil : signals
+        #else
+        return nil
+        #endif
+    }
+
+    #if os(iOS)
+    /// `iPhone15,2`, not `iPhone`: UIDevice.model names only the family. A simulator's `uname` is the
+    /// host's CPU, so it reports the simulated model instead.
+    private static func hardwareModel() -> String? {
+        #if targetEnvironment(simulator)
+        return ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]
+        #else
+        var info = utsname()
+        guard uname(&info) == 0 else { return nil }
+        return withUnsafeBytes(of: &info.machine) { buffer in
+            String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        #endif
+    }
+    #endif
 
     func appVersion() -> String {
         let info = Bundle.main.infoDictionary ?? [:]
