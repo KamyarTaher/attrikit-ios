@@ -323,7 +323,8 @@ usage description:
 ```
 
 Request ATT from an appropriate UI moment before starting AttriKit when IDFA must be in
-the first first-open payload. A denial still starts consent-safe core measurement:
+the first first-open payload. A denial still starts measurement, and AttriKit's servers
+then deliver that install's events to your connected destinations without the IDFA:
 
 ```swift
 import AttriKitCore
@@ -400,34 +401,109 @@ host app. For a host using the SDK exactly as documented above, enter these rows
 
 | App Store Connect data type | Linked to user | Used for tracking | Purposes |
 | --- | --- | --- | --- |
-| Identifiers > Device ID | Yes | No | App Functionality; Analytics; Developer's Advertising or Marketing |
-| Usage Data > Product Interaction | Yes | No | Analytics |
-| Contact Info > Email Address | Yes | No | Analytics; Developer's Advertising or Marketing |
-| Contact Info > Phone Number | Yes | No | Analytics; Developer's Advertising or Marketing |
+| Identifiers > Device ID | Yes | Yes when a Meta, TikTok or Google destination is connected; otherwise No | App Functionality; Analytics; Developer's Advertising or Marketing |
+| Usage Data > Product Interaction | Yes | Yes when a Meta, TikTok or Google destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
+| Location > Coarse Location | Yes | Yes when a Meta or Google destination is connected; otherwise No | Analytics; App Functionality; Developer's Advertising or Marketing |
+| Contact Info > Email Address | Yes | Yes when a Meta or TikTok destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
+| Contact Info > Phone Number | Yes | Yes when a Meta or TikTok destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
 
 Declare the Email Address row only when the host calls `setFunnelIdentity(email:)` and
 the Phone Number row only when it calls `setFunnelIdentity(phone:)`. The values are
 hashed, but Apple still treats them as their underlying contact-information types.
+
+"Connected" means you set the destination up for this app in AttriKit. Answer a
+conditional row Yes when one of the named destinations is connected, otherwise No. "What
+AttriKit sends to the destinations you connect" below lists what each one receives.
+
+The Device ID row also covers the IP address and user agent AttriKit's servers keep and
+send: App Store Connect has no data type of its own for them, and Apple says to declare an
+IP address under the type that matches its use, such as Device ID.
 
 ### Core + tracking
 
 | App Store Connect data type | Linked to user | Used for tracking | Purposes |
 | --- | --- | --- | --- |
 | Identifiers > Device ID | Yes | Yes | App Functionality; Analytics; Developer's Advertising or Marketing |
-| Usage Data > Product Interaction | Yes | No | Analytics |
-| Contact Info > Email Address | Yes | No | Analytics; Developer's Advertising or Marketing |
-| Contact Info > Phone Number | Yes | No | Analytics; Developer's Advertising or Marketing |
+| Usage Data > Product Interaction | Yes | Yes when a Meta, TikTok or Google destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
+| Location > Coarse Location | Yes | Yes when a Meta or Google destination is connected; otherwise No | Analytics; App Functionality; Developer's Advertising or Marketing |
+| Contact Info > Email Address | Yes | Yes when a Meta or TikTok destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
+| Contact Info > Phone Number | Yes | Yes when a Meta or TikTok destination is connected; otherwise No | Analytics; Developer's Advertising or Marketing |
 
-The same conditional rule applies to the two Contact Info rows. If the host or another
-SDK also links Product Interaction or hashed contact information with third-party data
-for targeted advertising or advertising measurement, mark those additional rows as
-used for tracking too.
+If the host or another SDK links any other data with third-party data for targeted
+advertising or advertising measurement, mark those rows as used for tracking too.
 
 If the host sends purchase or subscription events, it must additionally declare
-**Purchases > Purchase History**, linked to the user, not used for tracking by AttriKit,
-for **Analytics** and **App Functionality**. Reconcile these rows whenever host behavior
-or enabled SDK products change; an SDK privacy manifest does not replace the app's
-answers in App Store Connect.
+**Purchases > Purchase History**, linked to the user, used for tracking when a Meta,
+TikTok or Google destination is connected (otherwise not), for **Analytics**, **App
+Functionality** and **Developer's Advertising or Marketing**. Reconcile these rows
+whenever host behavior or enabled SDK products change; an SDK privacy manifest does not
+replace the app's answers in App Store Connect.
+
+### What AttriKit sends to the destinations you connect
+
+A Tracking "Yes" means Apple requires your app to get the user's permission through App
+Tracking Transparency before tracking them. AttriKit's servers do not check that
+permission. They send each event you map to a connected Meta, TikTok or Google
+destination, with the data listed below, once the consent your app gave AttriKit for the
+install allows measurement, whether the user allowed tracking, declined it or was never
+asked. The integration shown above gives a user who declines the ATT prompt that
+measurement consent. Of what destinations receive, only the IDFA, Meta's date-of-birth and
+gender hashes, the tracking status sent to each network and, when your app sets no Google
+consent of its own, Google's consent flags follow the tracking consent your app passes to
+AttriKit. A declined tracking consent does not keep the IP address from Google: Google
+loses it only in the cases its entry below names. No setting in AttriKit's dashboard or
+API holds the rest back for a user who declined tracking.
+
+AttriKit's servers send these, not the SDK, and only to the destinations you connect in
+AttriKit. A destination receives only the events you map to it, and nothing for an install
+whose AttriKit consent does not allow measurement. The country is the one AttriKit's
+servers derive from the IP address the install's first open arrived from, else the ad
+click's, unless the event carries its own `country_code` property. Properties you attach
+to an event go to every destination you map the event to, so any personal data in them, a
+country included, must be declared for those destinations too. They leave as you attached
+them, with these changes: a purchase that carries `price_minor_units` and a currency but
+no `value` gains a decimal `value` (Meta and TikTok then drop `price_minor_units`; Google
+receives it as `value` and `currency_code`); a refund or chargeback leaves without
+`price_minor_units`, and without `value`, `currency` or `currency_code` when it carried an
+amount; and Meta and TikTok also receive the ID of the ad AttriKit attributed the install
+to.
+
+- **Meta (Conversions API).** The event's name, time and ID and its properties, including
+  a purchase's value and currency. The IP address the install's first open arrived from,
+  else the ad click's, and a user agent: that of the browser that clicked the ad when
+  AttriKit has the click, else the app's. Both are unhashed, as Meta requires. A SHA-256
+  hash of the install's country. A SHA-256 hash derived from the installation ID, as
+  `external_id`. The SHA-256 email and phone hashes your app sent with
+  `setFunnelIdentity`, or that your AttriKit link page captured. Meta's own click and
+  browser IDs (`fbc`, `fbp`) when the ad click carried them. For an install matched on
+  device signals, AttriKit's match confidence. Only when the user authorized tracking: the
+  IDFA, and date-of-birth and gender hashes when AttriKit holds them. Events sent to a
+  dataset linked to a Meta app (`actionSource` set to `app`) also carry the bundle ID, the
+  app and OS versions and whether the user authorized tracking.
+- **TikTok (Events API 2.0).** The event's name, time, ID and properties, including a
+  purchase's value and currency. The same IP address and user agent as Meta. The SHA-256
+  email and phone hashes. On web events, the default: the installation-ID hash as
+  `external_id`, and TikTok's own click and browser IDs (`ttclid`, `ttp`). On app events:
+  the App Store ID, the app version and the user's ATT status, and the IDFA only when the
+  user authorized tracking. For an install matched on device signals, AttriKit's match
+  confidence. AttriKit sends TikTok no country of its own; a country in the event's
+  properties reaches TikTok with them.
+- **Google (App Conversion Tracking API).** The event type, time and properties, including
+  value and currency. A first-open time and the app, OS and SDK versions, read from the
+  event's own `first_open_at`, `app_version`, `os_version` and `sdk_version` properties: an
+  event without them sends `unknown` for each version and its own time as the first-open
+  time. The install's country as a plain two-letter code, and whether EU rules apply. One
+  device ID: the IDFA when the user authorized tracking, else the IDFV when your app links
+  `AttriKitTracking`, whatever the user answered to the ATT prompt, else an all-zero ID. A
+  limit-ad-tracking flag, set unless the user authorized tracking, and Google's
+  `ad_user_data` and `ad_personalization` consent flags. Google's click IDs (`gclid`,
+  `gbraid`) when the ad click carried them. The user agent. The IP address, except where
+  EU rules apply (by default, a user in the EEA, the UK or Switzerland, or whose country
+  is unknown) and `ad_user_data` was not granted, or wherever your app or its consent
+  platform passed an explicit `ad_user_data` denial (`setGoogleConsent` or IAB TCF).
+  Outside EU rules and without that explicit denial, a user who declined tracking still has
+  the IP address sent: the `ad_user_data` denial AttriKit derives from a declined tracking
+  consent does not withhold it. Google receives no email, phone or installation-ID hash.
 
 ## Deferred link tokens (optional)
 

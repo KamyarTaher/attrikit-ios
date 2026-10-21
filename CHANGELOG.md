@@ -1,5 +1,28 @@
 # AttriKit for iOS: changes
 
+## 2.7.1 (2026-10-21)
+
+### Privacy manifest changed (read before upgrading)
+
+- AttriKitCore's privacy manifest now declares Coarse Location (linked; Analytics, App
+  Functionality, Developer Advertising) and Purchase History (linked; Analytics, App Functionality,
+  Developer Advertising). Product Interaction adds Developer Advertising, in AttriKitCore and
+  AttriKitSuperwall. Their tracking flags stay off. The first open has always carried the device's
+  region and arrived from an IP address AttriKit derives a country from, and purchase events have
+  always gone through Core, but the manifest declared neither. Xcode's privacy report will now list
+  both.
+- The App Store answers under "What your app must declare" in the README changed. AttriKit's servers
+  send the events you map to a connected Meta, TikTok or Google destination together with match
+  keys, so Device ID, Product Interaction, Coarse Location, Purchase History, Email Address and
+  Phone Number are now marked as used for tracking for the destinations that receive them. A new
+  section lists what each destination receives. The manifest's tracking flags stay off because that
+  use depends on the destinations you connect, which the binary cannot know. If your app has any of
+  those destinations connected, re-check every tracking answer you filed.
+
+### Unchanged
+
+- No API, wire or behaviour change.
+
 ## 2.7.0 (2026-10-03)
 
 ### Added
