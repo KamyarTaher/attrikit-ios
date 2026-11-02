@@ -28,12 +28,8 @@
 ### Added
 
 - The first open now carries `device_signals`: the hardware model (`iPhone15,2`), the IANA time
-  zone and the screen in points with its scale. AttriKit compares them with the ad click that came
-  before the install, where Facebook's and Instagram's in-app browsers report the same model and a
-  landing page reports the same time zone and screen. Before this release an iOS install could be
-  matched to a click only on its IP address, timing and language, so a phone that changed network
-  between the click and the first open (Wi-Fi to cellular) was rarely matched. Android has sent
-  these values, with its OS build and languages, since its first release.
+  zone and the screen in points with its scale. Android has sent these values, with its OS build
+  and languages, since its first release.
 
 ### Changed (read before upgrading)
 
